@@ -11,9 +11,10 @@ import cv2
 import h5py
 
 # useful functions
-def normalize_cleanIm(Z, min_Z, max_Z):
-    if nargin == 1:
+def normalize_cleanIm(Z, min_Z=None, max_Z=None):
+    if min_Z:
         min_Z = min(min(Z))
+    if max_Z:
         max_Z = max(max(Z))
 
     Z = (Z - min_Z)/(max_Z - min_Z)
@@ -74,9 +75,9 @@ class MSGNet_dataset(Dataset):
 
 # MSGNet 
 class ConvPReLu(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ConvPReLu, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, 5, stride=1, padding=2)
+    def __init__(self, in_channels, out_channels, kernel=5, stride=1, padding=2):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel, stride=stride, padding=padding)
         self.activation = nn.PReLU()
 
     def forward(self, x):
@@ -85,10 +86,10 @@ class ConvPReLu(nn.Module):
         return x
     
 class DeconvPReLu(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(ConvPReLu, self).__init__()
-        self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
-        self.activation = nn.PReLU(inplace=True)
+    def __init__(self, in_channels, out_channels, kernel=3, stride=2, padding=1):
+        super().__init__()
+        self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel, stride=stride, padding=padding)
+        self.activation = nn.PReLU()
 
     def forward(self, x):
         x = self.conv(x)
@@ -110,11 +111,11 @@ class MSGNet(nn.Module):
         k_2 = k + 2 # post-fusion indexes
         k_3 = np.arange(3*m + 1, M - 1, 3) # post-fusion indexes
         
-        self.feature_extraction_Y = []
-        self.upsampling_X = []
+        self.feature_extraction_Y = nn.ModuleList()
+        self.upsampling_X = nn.ModuleList()
         # Y-branch
         in_, out = 3, 49
-        self.feature_extraction_Y.append(nn.PReLU(nn.Conv2d(in_, out, 7, stride=1, padding=3)))
+        self.feature_extraction_Y.append(ConvPReLu(in_, out, 7, 1, 3))
         in_, out = 49, 32
         self.feature_extraction_Y.append(ConvPReLu(in_, out))
         for i in range(2, 2*m):
@@ -125,23 +126,23 @@ class MSGNet(nn.Module):
             
         # h(D)-branch   
         in_, out = 3, 64
-        self.feature_extraction_X = nn.PReLU(nn.Conv2d(in_, out, 5, stride=1, padding=2))
+        self.feature_extraction_X = ConvPReLu(in_, out, 5, 1, 2)
         j = 0
         for i in range(1, M):
             if i in k:
-                self.upsampling_X.append(DeconvPReLu(in_, out, 5, stride=2, padding=2)) # deconvolution 
+                self.upsampling_X.append(DeconvPReLu(in_, out, 5, 2, 2)) # deconvolution 
             if i in k_1:
-                self.upsampling_X.append(ConvPReLu(in_*2, out, 5, stride=1, padding=2)) # convolution for concatenation aka fusion
+                self.upsampling_X.append(ConvPReLu(in_*2, out, 5, 1, 2)) # convolution for concatenation aka fusion
             if (i in k_2) or (i in k_3):
-                self.upsampling_X.append(ConvPReLu(in_, out, 5, stride=1, padding=2)) # post-fusion
+                self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # post-fusion
         in_, out = 32, 1
-        self.upsampling_X.append(ConvPReLu(in_, out, 5, stride=1, padding=2)) # reconstruction        
+        self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # reconstruction        
         
-    def forward(self, gt, rgb):
+    def forward(self, rgb, gt):
     	# early spectral decomposition
         h = np.ones(3,3)/9
         
-        im_Dl = imresize(float(gt),  self.upsample, 'bicubic')
+        im_Dl = imresize(gt,  1/self.upsample, 'bicubic')
         [im_Dl, min_D, max_D] = normalize_cleanIm(im_Dl)
     
         im_Dl_LF = convolve(im_Dl, h, 'reflect')
@@ -151,7 +152,7 @@ class MSGNet(nn.Module):
         im_I = rgb2ycbcr(rgb)
         im_Y = float(im_I[:,:,1])
             
-        im_Y = normalize_cleanIm(im_Y);
+        im_Y = normalize_cleanIm(im_Y)
         im_Y_LF = convolve(im_Y, h, 'reflect')
         [im_Y, min_Y, max_Y] = normalize_cleanIm(im_Y - im_Y_LF)
     
@@ -189,10 +190,10 @@ def train(model, train_loader, optimizer, loss, device, epoch):
     model.train()
     train_loss = 0
     for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
+        rgb, df = rgb.to(device), df.to(device)
         optimizer.zero_grad()
-        output = model(data)
-        train_loss = loss(output, target) 
+        output = model(rgb, df)
+        train_loss = loss(output, df)
         train_loss.backward()
         optimizer.step()
         if batch_idx % 100 == 0:
@@ -223,8 +224,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(model.parameters(), 10e-3,
                                 momentum=0.9)
     loss = RMSELoss()
+    epochs=5
     for epoch in range(epochs):
         train(model, train_loader, optimizer, loss, device, epoch)
         #test(model, test_loader, loss, device, epoch)
-
-
