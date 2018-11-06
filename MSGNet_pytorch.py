@@ -139,17 +139,20 @@ class MSGNet(nn.Module):
                 self.upsampling_X.append(ConvPReLu(in_, out, 5, stride=1, padding=2)) # post-fusion
             in_, out = 32, 32
         in_, out = 32, 1
-        self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # reconstruction  
+        self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # reconstruction 
         
-    def forward(self, rgb, gt):
-    	# early spectral decomposition
+   def forward(self, rgb, gt):
+        # early spectral decomposition
         h = np.ones((3,3))/9
         im_Dl = imresize(gt[0].cpu().numpy(),  1/self.upsample, 'bicubic')
         [im_Dl, min_D, max_D] = normalize_cleanIm(im_Dl)
 
         im_Dl_LF = convolve(im_Dl, h, mode='reflect')
         in_D = im_Dl - im_Dl_LF
-
+        print(in_D.shape)
+        in_D = np.moveaxis(in_D, 0, 1)
+        print(in_D.shape)
+        in_D = in_D.reshape(1, 1, in_D.shape[0], in_D.shape[1])
         # Y-channel
         im_Y = np.moveaxis(rgb[0].cpu().numpy(), 0, -1)
         im_I = rgb2ycbcr(im_Y)
@@ -158,32 +161,46 @@ class MSGNet(nn.Module):
         im_Y_LF = convolve(im_Y, h, mode='reflect')
 
         [h_Yh, min_, max_] = normalize_cleanIm(im_Y - im_Y_LF)
+        h_Yh = h_Yh[:-1, :-1]
+        print(h_Yh.shape)
+        h_Yh = np.moveaxis(h_Yh, 0, 1)
         h_Yh = h_Yh.reshape(1, 1, h_Yh.shape[0], h_Yh.shape[1])
-        
-        # forward model 
+        print(h_Yh.shape)
+
+# forward model 
         m = int(np.log2(self.upsample))
-        k = np.arange(1, 3*m, 3)
+        k = np.arange(0, 3*m-1, 3)
         k_1 = k + 1
-        x = imresize(gt, 1/self.upsample, 'bicubic')
+        # x = imresize(gt[0].cpu().numpy(), 1/self.upsample, 'bicubic')
         # Y-branch
-        self.outputs_Y = [h_Yh]
+        self.outputs_Y = [torch.cuda.FloatTensor(h_Yh)]
         for layer in self.feature_extraction_Y:
-            self.outputs_Y.append(layer(self.outputs_Y[-1]))
+            print('Ok')
+            self.outputs_Y.append(layer(self.outputs_Y[-1].float()))
         # h(D)-branch
         self.outputs_X = []
-        self.outputs_X.append(self.feature_extraction_X(x))
-        k = 0
+        self.outputs_X.append(self.feature_extraction_X(torch.cuda.FloatTensor(in_D)).float())
         for i, layer in enumerate(self.upsampling_X):
+            print('Ok')
+            print(self.outputs_X[-1].shape)
             self.outputs_X.append(layer(self.outputs_X[-1]))
-            if i in k_1:
-                y_ind = 2*(m + i // 3) - 1
-                self.outputs_X.append(layer(torch.cat([outputs_Y[y_ind], outputs_X[-1]], 1)))
-        
+
+            if i in k:
+                y_ind = 2*(m + i // 3)
+                print('here')
+                print(self.outputs_Y[y_ind].shape, self.outputs_X[-1].shape)
+                self.outputs_X.append(torch.cat((self.outputs_Y[y_ind], self.outputs_X[-1]), 1))
+
         im_Dh = self.outputs_X[-1]
-        x_LF = imresize(x_LF, self.upsample, 'bicubic')
-        output = im_Dh + im_D_LF[1:-1, 1:-1]# post-reconstruction
-        im_Dh = im_Dh*(max_D - min_D) + min_D
-        
+        print(im_Dl_LF.shape, im_Dh.shape)
+        im_Dl_LF = cv2.resize(im_Dl_LF, dsize=gt[0].shape, interpolation=cv2.INTER_CUBIC)
+        im_Dl_LF = torch.cuda.FloatTensor(im_Dl_LF).float()
+        print(im_Dl_LF[0:-1, 0:-1].shape, im_Dh.shape)
+        im_Dh = im_Dh + im_Dl_LF[0:-1, 0:-1]# post-reconstruction
+
+        output = im_Dh.cpu().numpy()*(max_D - min_D) + min_D
+        output = torch.cuda.FloatTensor(output).float()
+
         return output
 
 def train(model, train_loader, optimizer, loss, device, epoch):
