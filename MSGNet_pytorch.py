@@ -21,12 +21,13 @@ def normalize_cleanIm(Z, min_Z=None, max_Z=None):
     return [Z, min_Z, max_Z] 
 
 def rgb2ycbcr(im_rgb):
-    im_rgb = im_rgb.astype(np.float32)
-    im_ycrcb = cv2.cvtColor(im_rgb, cv2.COLOR_RGB2YCR_CB)
-    im_ycbcr = im_ycrcb[:,:,(0,2,1)].astype(np.float32)
-    im_ycbcr[:,:,0] = (im_ycbcr[:,:,0]*(235-16)+16)/255.0 #to [16/255, 235/255]
-    im_ycbcr[:,:,1:] = (im_ycbcr[:,:,1:]*(240-16)+16)/255.0 #to [16/255, 240/255]
-    return im_ycbcr
+    xform = np.array([[1, 0, 1.402], [1, -0.34414, -.71414], [1, 1.772, 0]])
+    rgb = im_rgb.astype(np.float)
+    rgb[:,:,[1,2]] -= 128
+    rgb = rgb.dot(xform.T)
+    np.putmask(rgb, rgb > 255, 255)
+    np.putmask(rgb, rgb < 0, 0)
+    return np.uint8(rgb)
 
 # loss function
 class RMSELoss(torch.nn.Module):
@@ -140,25 +141,22 @@ class MSGNet(nn.Module):
         
     def forward(self, rgb, gt):
     	# early spectral decomposition
-        h = np.ones(3,3)/9
-        
-        im_Dl = imresize(gt,  1/self.upsample, 'bicubic')
+        h = np.ones((3,3))/9
+        im_Dl = imresize(gt[0].cpu().numpy(),  1/self.upsample, 'bicubic')
         [im_Dl, min_D, max_D] = normalize_cleanIm(im_Dl)
-    
-        im_Dl_LF = convolve(im_Dl, h, 'reflect')
+
+        im_Dl_LF = convolve(im_Dl, h, mode='reflect')
         in_D = im_Dl - im_Dl_LF
-        
-        # Y-channel 
-        im_I = rgb2ycbcr(rgb)
-        im_Y = float(im_I[:,:,1])
-            
-        im_Y = normalize_cleanIm(im_Y)
-        im_Y_LF = convolve(im_Y, h, 'reflect')
-        [im_Y, min_Y, max_Y] = normalize_cleanIm(im_Y - im_Y_LF)
-    
-        im_Y = im_Y[1:-1, 1:-1]
-        
-        h_Yh = normalize_cleanIm(im_Y - im_Y_LF)
+
+        # Y-channel
+        im_Y = np.moveaxis(rgb[0].cpu().numpy(), 0, -1)
+        im_I = rgb2ycbcr(im_Y)
+        im_Y = im_Y[:,:,1]
+        [im_Y, min_Y, max_Y] = normalize_cleanIm(im_Y)
+        im_Y_LF = convolve(im_Y, h, mode='reflect')
+
+        [h_Yh, min_, max_] = normalize_cleanIm(im_Y - im_Y_LF)
+        h_Yh = h_Yh.reshape(1, 1, h_Yh.shape[0], h_Yh.shape[1])
         
         # forward model 
         m = int(np.log2(self.upsample))
