@@ -115,7 +115,7 @@ class MSGNet(nn.Module):
         self.feature_extraction_Y = nn.ModuleList()
         self.upsampling_X = nn.ModuleList()
         # Y-branch
-        in_, out = 3, 49
+        in_, out = 1, 49
         self.feature_extraction_Y.append(ConvPReLu(in_, out, 7, 1, 3))
         in_, out = 49, 32
         self.feature_extraction_Y.append(ConvPReLu(in_, out))
@@ -124,20 +124,22 @@ class MSGNet(nn.Module):
                 self.feature_extraction_Y.append(ConvPReLu(in_, out))
             if i in j_:
                 self.feature_extraction_Y.append(nn.MaxPool2d(3, 3))
-            
+
         # h(D)-branch   
-        in_, out = 3, 64
+        in_, out = 1, 64
         self.feature_extraction_X = ConvPReLu(in_, out, 5, 1, 2)
         j = 0
+        in_, out = 64, 32
         for i in range(1, M):
             if i in k:
-                self.upsampling_X.append(DeconvPReLu(in_, out, 5, 2, 2)) # deconvolution 
+                self.upsampling_X.append(DeconvPReLu(in_, out, 5, stride=2, padding=2)) # deconvolution 
             if i in k_1:
-                self.upsampling_X.append(ConvPReLu(in_*2, out, 5, 1, 2)) # convolution for concatenation aka fusion
+                self.upsampling_X.append(ConvPReLu(in_*2, out, 5, stride=1, padding=2)) # convolution for concatenation aka fusion
             if (i in k_2) or (i in k_3):
-                self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # post-fusion
+                self.upsampling_X.append(ConvPReLu(in_, out, 5, stride=1, padding=2)) # post-fusion
+            in_, out = 32, 32
         in_, out = 32, 1
-        self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # reconstruction        
+        self.upsampling_X.append(ConvPReLu(in_, out, 5, 1, 2)) # reconstruction  
         
     def forward(self, rgb, gt):
     	# early spectral decomposition
