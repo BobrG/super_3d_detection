@@ -34,18 +34,40 @@ def rgb2ycbcr(im_rgb):
 # loss function
 class RMSELoss(torch.nn.Module):
     def __init__(self):
-        super(RMSELoss,self).__init__()
+    	super(RMSELoss,self).__init__()
 
-        # TODO hack
-        #if img.shape[1] % 2 != 0:
-        #    img = img[:, :-1]
-        #    df = df[:, :-1]
-        #if img.shape[2] % 2 != 0:
-        #    img = img[:, :, :-1]
-        #    df = df[:, :, :-1]
-        #img = img[:, :256, :256]
-        #df = df[:, :256, :256]
+    def forward(self, x, y):
+        criterion = nn.MSELoss()
+        loss = torch.sqrt(criterion(x, y))
+        return loss
 
+# dataset class
+class MSGNet_dataset(Dataset):
+    """Default MSGNet dataset."""
+
+    def __init__(self, root_dir, transform=None):
+        """
+        Args:
+            root_dir (string): Directory with all the images.
+            transform (callable, optional): Optional transform to be applied
+                on a sample.
+        """
+        self.root_dir = root_dir
+        self.transform = transform
+        f = h5py.File(root_dir + 'Df.mat', 'r')
+        dataset_shape = f['Df'].shape
+
+    def __len__(self):
+        return dataset_shape[1]
+
+    def __getitem__(self, idx):
+        # get rgb image
+        imgs = h5py.File(root_dir + 'RGB.mat', 'r')
+        img = imgs[imgs['RGB'][0][idx]][:]
+        
+        # get deep map for image
+        dfs = h5py.File(root_dir + 'Df.mat', 'r')
+        df = dfs[dfs['Df'][0][idx]][:]
 
         img_patches =
         df_pathces =
