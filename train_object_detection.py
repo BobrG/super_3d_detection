@@ -9,6 +9,23 @@ NUM_HEADING_BIN = 12
 NUM_SIZE_CLUSTER = 8 # one cluster for each type
 NUM_OBJECT_POINT = 512
 
+# TODO: rewrite for matterport or sunrgbd
+# g_type2class={'Car':0, 'Van':1, 'Truck':2, 'Pedestrian':3,
+#               'Person_sitting':4, 'Cyclist':5, 'Tram':6, 'Misc':7}
+# g_class2type = {g_type2class[t]:t for t in g_type2class}
+# g_type2onehotclass = {'Car': 0, 'Pedestrian': 1, 'Cyclist': 2}
+# g_type_mean_size = {'Car': np.array([3.88311640418,1.62856739989,1.52563191462]),
+#                     'Van': np.array([5.06763659,1.9007158,2.20532825]),
+#                     'Truck': np.array([10.13586957,2.58549199,3.2520595]),
+#                     'Pedestrian': np.array([0.84422524,0.66068622,1.76255119]),
+#                     'Person_sitting': np.array([0.80057803,0.5983815,1.27450867]),
+#                     'Cyclist': np.array([1.76282397,0.59706367,1.73698127]),
+#                     'Tram': np.array([16.17150617,2.53246914,3.53079012]),
+#                     'Misc': np.array([3.64300781,1.54298177,1.92320313])}
+# g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
+# for i in range(NUM_SIZE_CLUSTER):
+#     g_mean_size_arr[i,:] = g_type_mean_size[g_class2type[i]]
+
 def mask_to_indices(mask):
     indices = torch.zeros((mask.shape[0], npoints, 2), dtype=torch.int32)
     for i in range(mask.shape[0]):
@@ -91,7 +108,6 @@ def get_box3d_corners(center, heading_residuals, size_residuals):
 
     return tf.reshape(corners_3d, [batch_size, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, 8, 3])
 
-
 def masking(point_cloud, segmentation):
     mask = segmentation[:, :, 0] < segmentation[:, :, 1] # BxNx1
     mask_count = torch.sum(mask, 1).repeat(1, 1, 3) # Bx1x3
@@ -156,27 +172,25 @@ def object_detection_model(nn.Module):
         box_parameters = self.box_est[-1](global_features)
 
         # Parse output to 3D box parameters
-        center = torch.narrow(box_parameters, 1, 0, 3)
+        batch_size = output.shape[0]
+        center = output[:,:3]
         output['center_boxnet'] = center
 
-        heading_scores = torch.narrow(box_parameters, 1, 3, NUM_HEADING_BIN)
-        heading_residuals_normalized = torch.narrow(box_parameters, 1, 3+NUM_HEADING_BIN, NUM_HEADING_BIN)
+        heading_scores = output[:, 3:NUM_HEADING_BIN]
+        heading_residuals_normalized = output[:, 3+NUM_HEADING_BIN:NUM_HEADING_BIN]
         output['heading_scores'] = heading_scores # BxNUM_HEADING_BIN
         output['heading_residuals_normalized'] = heading_residuals_normalized # BxNUM_HEADING_BIN (-1 to 1)
         output['heading_residuals'] = heading_residuals_normalized * (np.pi/NUM_HEADING_BIN) # BxNUM_HEADING_BIN
 
-        size_scores = torch.narrow(box_parameters, 1, 3+NUM_HEADING_BIN*2, NUM_SIZE_CLUSTER]) # BxNUM_SIZE_CLUSTER
-        size_residuals_normalized = torch.narrow(box_parameters, 1, 3+NUM_HEADING_BIN*2+NUM_SIZE_CLUSTER, NUM_SIZE_CLUSTER*3)
-        batch_size = box_parameters.size()[0]
+        size_scores = box_parameters[:, 3+NUM_HEADING_BIN*2:NUM_SIZE_CLUSTER] # BxNUM_SIZE_CLUSTER
+        size_residuals_normalized = output[:, 3+NUM_HEADING_BIN*2+NUM_SIZE_CLUSTER:NUM_SIZE_CLUSTER*3]
         size_residuals_normalized = size_residuals_normalized.view(batch_size, NUM_SIZE_CLUSTER, 3) # BxNUM_SIZE_CLUSTERx3
         output['size_scores'] = size_scores
         output['size_residuals_normalized'] = size_residuals_normalized
-        output['size_residuals'] = size_residuals_normalized * \
-                                   #tf.expand_dims(tf.constant(g_mean_size_arr, dtype=tf.float32), 0)
-
+        output['size_residuals'] = size_residuals_normalized * torch.from_numpy(g_mean_size_arr, dtype=tf.float32).unsqueeze(0)
 
         output['center_prediction'] = output['center_boxnet'] + center_1 # Bx3 (C_mask + delta_C_tnet) + delta_C_boxnet
-        heading_scores =
+        
         return output
     
 def huber_loss(error, delta):
