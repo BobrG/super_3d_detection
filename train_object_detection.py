@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from torch import nn
 from torch.nn import functional as F
 from tochvision import models 
@@ -68,7 +69,7 @@ def get_box3d_corners_helper(centers, headings, sizes):
     x_corners = torch.cat([l/2,l/2,-l/2,-l/2,l/2,l/2,-l/2,-l/2], axis=1) # (N,8)
     y_corners = torch.cat([h/2,h/2,h/2,h/2,-h/2,-h/2,-h/2,-h/2], axis=1) # (N,8)
     z_corners = torch.cat([w/2,-w/2,-w/2,w/2,w/2,-w/2,-w/2,w/2], axis=1) # (N,8)
-    corners = torch.cat([x_corners.unsqueeze(1), y_corners.unqueeze(1), z_corners.unsqueeze(1)], axis=1) # (N,3,8)
+    corners = torch.cat([x_corners.unsqueeze(1), y_corners.unsqueeze(1), z_corners.unsqueeze(1)], axis=1) # (N,3,8)
     #print x_corners, y_corners, z_corners
     c = torch.cos(headings)
     s = torch.sin(headings)
@@ -187,7 +188,7 @@ def object_detection_model(nn.Module):
         size_residuals_normalized = size_residuals_normalized.view(batch_size, NUM_SIZE_CLUSTER, 3) # BxNUM_SIZE_CLUSTERx3
         output['size_scores'] = size_scores
         output['size_residuals_normalized'] = size_residuals_normalized
-        output['size_residuals'] = size_residuals_normalized * torch.from_numpy(g_mean_size_arr, dtype=tf.float32).unsqueeze(0)
+        output['size_residuals'] = size_residuals_normalized * torch.from_numpy(g_mean_size_arr).unsqueeze(0)
 
         output['center_prediction'] = output['center_boxnet'] + center_1 # Bx3 (C_mask + delta_C_tnet) + delta_C_boxnet
         
@@ -203,7 +204,7 @@ def huber_loss(error, delta):
 def loss(mask_label, center_label, \
          heading_class_label, heading_residual_label, \
          size_class_label, size_residual_label, \
-         pipelin_output, corner_loss_weight):
+         pipeline_output, corner_loss_weight):
     ''' Loss function for 3D object detection pipeline.
     Input:
         mask_label:  shape (B,N)
@@ -219,17 +220,90 @@ def loss(mask_label, center_label, \
         total_loss: scalar tensor
             the total_loss is also added to the losses collection
     '''
-    seg_loss = torch.mean(torch.nn.Softmax())
-    tnet_loss = huber_loss()
-    center_loss = huber_loss()
-    hcls_loss = torch.mean(torch.nn.Softmax())
-    hreg_loss = huber_loss()
-    heading_angle_loss = hcls_loss + hreg_loss
-    box_size_loss = scls_loss + sreg_loss
-    corner_loss = 
-    loss = seg_loss + l*(tnet_loss + center_loss + heading_angle_loss + box_size_loss + g*corner_loss)
+    # 2dNet loss
 
-    return loss 
+    net2d_loss = #?
+
+    # 3D Segmentation loss
+    mask_loss = torch.mean(F.nll_loss(F.softmax(\
+        pipeline_output['mask_logits'], mask_label)))
+
+    # Center regression losses
+    center_dist = torch.norm(center_label - end_points['center'], p=2, dim=-1)
+    center_loss = huber_loss(center_dist, delta=2.0)
+    
+    stage1_center_dist = torch.norm(center_label - \
+        pipeline_output['stage1_center'], dim=-1)
+    stage1_center_loss = huber_loss(stage1_center_dist, delta=1.0)
+    
+    # Heading loss
+    heading_class_loss = torch.mean( \
+        F.nll_loss(F.softmax( \
+        pipeline_output['heading_scores'], heading_class_label)))
+
+    hcls_onehot = torch.nn.functional.one_hot(heading_class_label,
+        depth=NUM_HEADING_BIN) # BxNUM_HEADING_BIN
+    heading_residual_normalized_label = \
+        heading_residual_label / (np.pi/NUM_HEADING_BIN)
+    heading_residual_normalized_loss = huber_loss(torch.sum( \
+        pipeline_output['heading_residuals_normalized']*hcls_onehot.float()), 1) - \
+        heading_residual_normalized_label, delta=1.0)
+    
+    # Size loss
+    size_class_loss = torch.mean( /
+            F.nll_loss(F.softmax(pipeline_output['size_scores']), size_class_label))
+    
+    scls_onehot = torch.nn.functional.one_hot(size_class_label,
+        depth=NUM_SIZE_CLUSTER) # BxNUM_SIZE_CLUSTER
+    scls_onehot_tiled = scls_onehot.float().unsqueeze(-1).repeat(1,1,3) # BxNUM_SIZE_CLUSTERx3
+    predicted_size_residual_normalized = torch.sum( \
+        pipeline_output['size_residuals_normalized']*scls_onehot_tiled, 1) # Bx3
+
+    mean_size_arr_expand = torch.from_numpy(g_mean_size_arr).unsqueeze(0) # 1xNUM_SIZE_CLUSTERx3
+    mean_size_label = torch.sum( \
+        scls_onehot_tiled * mean_size_arr_expand, 1) # Bx3
+    size_residual_label_normalized = size_residual_label / mean_size_label
+    size_normalized_dist = torch.norm( \
+        size_residual_label_normalized - predicted_size_residual_normalized, p=2,
+        dim=-1)
+    size_residual_normalized_loss = huber_loss(size_normalized_dist, delta=1.0)
+
+    # Corner loss
+    # We select the predicted corners corresponding to the 
+    # GT heading bin and size cluster.
+    corners_3d = get_box3d_corners(pipeline_output['center'],
+        pipeline_output['heading_residuals'],
+        pipeline_output['size_residuals']) # (B,NH,NS,8,3)
+    gt_mask = hcls_onehot.unsqueeze(2).repeat(1,1,NUM_SIZE_CLUSTER) * \
+        scls_onehot.unsqueeze(1).repeat(1,NUM_HEADING_BIN,1) # (B,NH,NS)
+    corners_3d_pred = torch.sum( \
+        gt_mask.unsqueeze(-1).unsqueeze(-1).float() * corners_3d,
+        dim=(1,2))# (B,8,3)
+
+    heading_bin_centers = torch.from_numpy(np.arange(0,2*np.pi,2*np.pi/NUM_HEADING_BIN)) # (NH,)
+    heading_label = heading_residual_label.unsqueeze(1) + heading_bin_centers.unsqueeze(0) # (B,NH)
+    heading_label = torch.sum(hcls_onehot.float()*heading_label, dim=1)
+    mean_sizes = torch.from_numpy(g_mean_size_arr).unsqueeze(0) # (1,NS,3)
+    size_label = mean_sizes + size_residual_label.unsqueeze(1) # (1,NS,3) + (B,1,3) = (B,NS,3)
+    size_label = torch.sum(scls_onehot.float().unsqueeze(-1)*size_label, dim=1) # (B,3)
+    corners_3d_gt = get_box3d_corners_helper( \
+        center_label, heading_label, size_label) # (B,8,3)
+    corners_3d_gt_flip = get_box3d_corners_helper( \
+        center_label, heading_label+np.pi, size_label) # (B,8,3)
+
+    corners_dist = torch.min(torch.norm(corners_3d_pred - corners_3d_gt, p=2, dim=-1),
+        torch.norm(corners_3d_pred - corners_3d_gt_flip, p=2, dim=-1))
+
+    corners_loss = huber_loss(corners_dist, delta=1.0) 
+
+    total_loss = net2d_loss + mask_loss + box_loss_weight * (center_loss + \
+        heading_class_loss + size_class_loss + \
+        heading_residual_normalized_loss*20 + \
+        size_residual_normalized_loss*20 + \
+        stage1_center_loss + \
+        corner_loss_weight*corners_loss)
+
+    return total_loss 
 
 def train(model, train_loader, optimizer, loss, device, epoch):
     model.train()
