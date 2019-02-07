@@ -64,35 +64,82 @@ def _scale_enum(anchor, scales):
     anchors = _mkanchors(ws, hs, x_ctr, y_ctr)
     return anchors
 
-def proposal_layer(rpn_cls_prob_reshape, rpn_bbox_pred, im_info, cfg_key, anchor_scales=[8, 16, 32], 
-                    _feat_stride=[16, ]):
+############################################################
+#  Anchors
+############################################################
+
+def generate_anchors_single_pyramid(scales, ratios, shape, feature_stride, anchor_stride):
     """
-    Parameters
-    ----------
-    rpn_cls_prob_reshape: (1 , H , W , Ax2) outputs of RPN, prob of bg or fg
-    rpn_bbox_pred: (1 , H , W , Ax4), rgs boxes output of RPN
-    im_info: a list of [image_height, image_width, scale_ratios]
-    _feat_stride: the downsampling ratio of feature map to the original input image
-    anchor_scales: the scales to the basic_anchor (basic anchor is [16, 16])
-    ----------
-    Returns
-    ----------
-    rpn_rois : (1 x H x W x A, 5) e.g. [0, x1, y1, x2, y2]
-    # Algorithm:
-    #
-    # for each (H, W) location i
-    # generate A anchor boxes centered on cell i
-    # apply predicted bbox deltas at cell i to each of the A anchors
-    # clip predicted boxes to image
-    # remove predicted boxes with either height or width < threshold
-    # sort all (proposal, score) pairs by score from highest to lowest
-    # take top pre_nms_topN proposals before NMS
-    # apply NMS with threshold 0.7 to remaining proposals
-    # take after_nms_topN proposals after NMS
-    # return the top proposals (-> RoIs top, scores top)
+    scales: 1D array of anchor sizes in pixels. Example: [32, 64, 128]
+    ratios: 1D array of anchor ratios of width/height. Example: [0.5, 1, 2]
+    shape: [height, width] spatial shape of the feature map over which
+            to generate anchors.
+    feature_stride: Stride of the feature map relative to the image in pixels.
+    anchor_stride: Stride of anchors on the feature map. For example, if the
+        value is 2 then generate anchors for every other feature map pixel.
     """
-    _anchors = generate_anchors(scales=np.array(anchor_scales))
-    _num_anchors = _anchors.shape[0]
-    im_info = im_info[0]
-    
-    return blob
+    # Get all combinations of scales and ratios
+    scales, ratios = np.meshgrid(np.array(scales), np.array(ratios))
+    scales = scales.flatten()
+    ratios = ratios.flatten()
+
+    # Enumerate heights and widths from scales and ratios
+    heights = scales / np.sqrt(ratios)
+    widths = scales * np.sqrt(ratios)
+
+    # Enumerate shifts in feature space
+    shifts_y = np.arange(0, shape[0], anchor_stride) * feature_stride
+    shifts_x = np.arange(0, shape[1], anchor_stride) * feature_stride
+    shifts_x, shifts_y = np.meshgrid(shifts_x, shifts_y)
+
+    # Enumerate combinations of shifts, widths, and heights
+    box_widths, box_centers_x = np.meshgrid(widths, shifts_x)
+    box_heights, box_centers_y = np.meshgrid(heights, shifts_y)
+
+    # # Reshape to get a list of (y, x) and a list of (h, w)
+    # box_centers = np.stack(
+    #     [box_centers_y, box_centers_x], axis=2).reshape([-1, 2])
+    # box_sizes = np.stack([box_heights, box_widths], axis=2).reshape([-1, 2])
+
+    # NOTE: the original order is  (y, x), we changed it to (x, y) for our code
+    # Reshape to get a list of (x, y) and a list of (w, h)
+    box_centers = np.stack(
+        [box_centers_x, box_centers_y], axis=2).reshape([-1, 2])
+    box_sizes = np.stack([box_widths, box_heights], axis=2).reshape([-1, 2])
+
+    # Convert to corner coordinates (x1, y1, x2, y2)
+    boxes = np.concatenate([box_centers - 0.5 * box_sizes,
+                            box_centers + 0.5 * box_sizes], axis=1)
+    return boxes
+
+
+def generate_anchors_all_pyramids(scales, ratios, feature_shapes, feature_strides,
+                             anchor_stride):
+    """Generate anchors at different levels of a feature pyramid. Each scale
+    is associated with a level of the pyramid, but each ratio is used in
+    all levels of the pyramid.
+    Returns:
+    anchors: [N, (y1, x1, y2, x2)]. All generated anchors in one array. Sorted
+        with the same order of the given scales. So, anchors of scale[0] come
+        first, then anchors of scale[1], and so on.
+    """
+    # Anchors
+    # [anchor_count, (y1, x1, y2, x2)]
+    anchors = []
+    if len(ratios.shape) > 1:
+        for i in range(len(scales)):
+            anchors.append(generate_anchors_single_pyramid(scales[i], ratios[i], feature_shapes[i],
+                                            feature_strides[i], anchor_stride))
+    else:
+        for i in range(len(scales)):
+            anchors.append(generate_anchors_single_pyramid(scales[i], ratios, feature_shapes[i],
+                                            feature_strides[i], anchor_stride))
+    return np.concatenate(anchors, axis=0)
+
+############################################################
+#  Boxes Manipulations
+############################################################
+
+def bbox_transform_inv():
+
+    return 
