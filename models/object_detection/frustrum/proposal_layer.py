@@ -23,16 +23,18 @@ class proposal_layer_fpn(nn.Module):
         self.fpn_ratios = ratios
         self.fpn_anchor_stride = 1
         self.post_nms_topN = 2000 # Number of top scoring boxes to keep after applying NMS to RPN proposals
+        self.rpn_nms_thresh = 0.7
 
     def forward(self, input):
     """
     Parameters
     ----------
     input - list contains:
-        cls_prob_alls: (BS , H , W , Ax2) outputs of RPN, prob of bg or fg
-        bbox_pred_alls: (BS , H , W , Ax4), rgs boxes output of RPN
-        im_info: a list of [image_height, image_width, scale_ratios]
-        rpn_shapes: width and height of feature map
+        cls_prob_alls: (BS , H , W , Ax2) outputs of RPN (here - Feature Pyramid Network),
+                       prob of bg or fg;
+        bbox_pred_alls: (BS , H , W , Ax4), rgs boxes output of RPN;
+        im_info: a list of [image_height, image_width, scale_ratios];
+        rpn_shapes: width and height of feature map;
     ----------
     Returns
     ----------
@@ -95,7 +97,7 @@ class proposal_layer_fpn(nn.Module):
         # 7. take after_nms_topN (e.g. 300)
         # 8. return the top proposals (-> RoIs top)
 
-        keep_idx_i = nms(torch.cat((proposals_single, scores_single), 1), nms_thresh)
+        keep_idx_i = nms(proposals_single, scores_single, self.rpn_nms_thresh)
         keep_idx_i = keep_idx_i.long().view(-1)
 
         if self.post_nms_topN > 0:

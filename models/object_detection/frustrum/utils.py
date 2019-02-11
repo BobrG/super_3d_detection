@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 
 # Anchor generator;
 
@@ -111,7 +112,6 @@ def generate_anchors_single_pyramid(scales, ratios, shape, feature_stride, ancho
     boxes = np.concatenate([box_centers - 0.5 * box_sizes,
                             box_centers + 0.5 * box_sizes], axis=1)
     return boxes
-
 
 def generate_anchors_all_pyramids(scales, ratios, feature_shapes, feature_strides,
                              anchor_stride):
@@ -259,7 +259,6 @@ def clip_boxes(boxes, im_shape, batch_size):
         boxes[i,:,3::4].clamp_(0, im_shape[i, 0]-1)
 
     return boxes
-
 
 def bbox_overlaps(anchors, gt_boxes):
     """
