@@ -1,14 +1,26 @@
+import torch
 from torch import nn
 from torch.nn import functional as F
 from tochvision import models
 from rpn_fpn import RPN_FPN
 from roi_pooling import RoIPooling
+from proposal_target_layer import ProposalTargetLayer
+
+class FC(nn.Module):
+    def __init__(self, in_features, out_features, relu=True):
+        super(FC, self).__init__()
+        self.fc = nn.Linear(in_features, out_features)
+        self.relu = nn.ReLU(inplace=True) if relu else None
+
+    def forward(self, x):
+        x = self.fc(x)
+        if self.relu is not None:
+            x = self.relu(x)
+        return x
 
 class FasterRCNN(nn.Module):
-    POOLING_SIZE = 7
-
     def __init__(self, classes, rpn=RPN_FPN): #class_agnostic):
-        super(_FPN, self).__init__()
+        super(FasterRCNN, self).__init__()
         self.classes = classes
         self.n_classes = len(classes)
         #self.class_agnostic = class_agnostic
@@ -20,8 +32,7 @@ class FasterRCNN(nn.Module):
         self.rcnn_rpn = rpn()
         self.rcnn_proposal_target = ProposalTargetLayer(self.n_classes)
 
-        # NOTE: the original paper used pool_size = 7 for cls branch, and 14 for mask branch, to save the
-        # computation time, we first use 14 as the pool_size, and then do stride=2 pooling for cls branch.
+        POOLING_SIZE = 7
         self.RCNN_roi_pool = RoIPooling(POOLING_SIZE, POOLING_SIZE, 1.0/16.0)
 
         self.fc6 = FC(512 * 7 * 7, 4096)
@@ -83,14 +94,14 @@ class FasterRCNN(nn.Module):
         roi_pool_feat = self.PyramidRoI_Feat(feature_maps, rois, im_info)
 
         # feed pooled features to top model
-        x = roi_pooled_features.view(roi_pooled_features.size()[0], -1)
+        x = roi_pool_feat.view(roi_pool_feat.size()[0], -1)
         x = self.fc6(x)
         x = F.dropout(x, training=self.training)
         x = self.fc7(x)
         x = F.dropout(x, training=self.training)
 
         # compute bbox offset
-        bbox_pred = self.RCNN_bbox_pred(pooled_feat)
+        bbox_pred = self.RCNN_bbox_pred(x)
         if self.training and not self.class_agnostic:
             # select the corresponding columns according to roi labels
             bbox_pred_view = bbox_pred.view(bbox_pred.size(0), int(bbox_pred.size(1) / 4), 4)
@@ -118,9 +129,4 @@ class FasterRCNN(nn.Module):
             rois_label = rois_label.view(batch_size, -1)
 
         return rois, cls_prob, bbox_pred, rpn_loss_cls, rpn_loss_bbox, RCNN_loss_cls, RCNN_loss_bbox, rois_label
-
-
-    
-
-
         
