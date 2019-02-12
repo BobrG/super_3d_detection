@@ -4,7 +4,8 @@ from tochvision import models
 
 # num_points - number of points put into the network 
 # K - number of inputs (K should be 3 for XYZ coordinates, but can be larger if normals, colors, etc are included)
-def Seg_PointNet(num_points=2000, K=3):
+# k - length of one hot vector received from 2D Detector CNN
+def Seg_PointNet(num_points=2000, K=3, k=0):
     layers = []
     # Multilayer perceptrons with shared weights are implemented as 
 	# convolutions. This is because we are mapping from K inputs to 64 
@@ -19,7 +20,7 @@ def Seg_PointNet(num_points=2000, K=3):
 			nn.BatchNorm1d(64),
 			nn.ReLU())) # mlp1
 
-	layers.append(nn.Sequential(
+    layers.append(nn.Sequential(
 			nn.Conv1d(64, 64, 1),
 			nn.BatchNorm1d(64),
 			nn.ReLU(),
@@ -32,21 +33,22 @@ def Seg_PointNet(num_points=2000, K=3):
 
     layers.append(nn.MaxPool1d(num_points))
 
+    N = 1088 + k
     layers.append(nn.Sequential(
             nn.Conv1d(N, 512, 1),
             nn.BatchNorm1d(512),
             nn.ReLU(),
-            nn.Conv1d(512, 256, 1)
+            nn.Conv1d(512, 256, 1),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Conv1d(256, 128, 1)
+            nn.Conv1d(256, 128, 1),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Conv1d(128, 128, 1)
+            nn.Conv1d(128, 128, 1),
             nn.BatchNorm1d(128),
             nn.ReLU(),
             nn.Dropout(0.5),
-            nn.Conv1d(128, 2, 1)
+            nn.Conv1d(128, 2, 1),
             nn.BatchNorm1d(2),
             nn.ReLU()
         )) # mlp3
@@ -76,7 +78,7 @@ def T_Net(N, k):
     layers.append(nn.Sequential(
             nn.Linear(512 + k, 256),
             nn.Linear(256, 128),
-            mm.Linear(128, 3)
+            nn.Linear(128, 3)
         )) # fc 
     return layers
 
@@ -103,7 +105,7 @@ def Box_Estimation_Net(M, k, NS, NH):
     layers.append(nn.MaxPool1d(M))
 
     layers.append(nn.Sequential(
-            nn.Linear(512 + k, 256)
+            nn.Linear(512 + k, 256),
             nn.Linear(256, 3 + 4*NS + 2*NH)
         )) # fc
 
