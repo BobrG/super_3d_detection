@@ -1,6 +1,6 @@
 from torch import nn
 from torch.nn import functional as F
-from tochvision import models 
+from torchvision import models 
 
 # num_points - number of points put into the network 
 # K - number of inputs (K should be 3 for XYZ coordinates, but can be larger if normals, colors, etc are included)
@@ -57,7 +57,7 @@ def Seg_PointNet(num_points=2000, K=3, k=0):
 
 # N - number of points put into the network
 # k - onehot vector length
-def T_Net(N, k):
+def T_Net(N, k=0):
     
     layers = []
     
@@ -73,7 +73,7 @@ def T_Net(N, k):
 			nn.ReLU()
             )) # mlp1
 
-    layers.append(nn.MaxPool1d(N))
+    #layers.append(nn.MaxPool1d(N))
 
     layers.append(nn.Sequential(
             nn.Linear(512 + k, 256),
@@ -84,7 +84,7 @@ def T_Net(N, k):
 
 # M - Number of points put into the network
 # k - onehot vector size
-def Box_Estimation_Net(M, k, NS, NH):
+def Box_Estimation_Net(M, NS, NH, k=0):
     layers = [] 
 
     layers.append(nn.Sequential(

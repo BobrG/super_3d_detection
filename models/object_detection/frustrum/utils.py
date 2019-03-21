@@ -3,44 +3,49 @@ import numpy as np
 from torch.nn import functional as F
 
 NUM_HEADING_BIN = 12
-NUM_SIZE_CLUSTER = 8 # one cluster for each type
-NUM_OBJECT_POINT = 512
+NUM_SIZE_CLUSTER = 10
+NUM_CLASS = 10
 
-# TODO: rewrite for matterport or sunrgbd
-# g_type2class={'Car':0, 'Van':1, 'Truck':2, 'Pedestrian':3,
-#               'Person_sitting':4, 'Cyclist':5, 'Tram':6, 'Misc':7}
-# g_class2type = {g_type2class[t]:t for t in g_type2class}
-# g_type2onehotclass = {'Car': 0, 'Pedestrian': 1, 'Cyclist': 2}
-# g_type_mean_size = {'Car': np.array([3.88311640418,1.62856739989,1.52563191462]),
-#                     'Van': np.array([5.06763659,1.9007158,2.20532825]),
-#                     'Truck': np.array([10.13586957,2.58549199,3.2520595]),
-#                     'Pedestrian': np.array([0.84422524,0.66068622,1.76255119]),
-#                     'Person_sitting': np.array([0.80057803,0.5983815,1.27450867]),
-#                     'Cyclist': np.array([1.76282397,0.59706367,1.73698127]),
-#                     'Tram': np.array([16.17150617,2.53246914,3.53079012]),
-#                     'Misc': np.array([3.64300781,1.54298177,1.92320313])}
-# g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
-# for i in range(NUM_SIZE_CLUSTER):
-#     g_mean_size_arr[i,:] = g_type_mean_size[g_class2type[i]]
+type2class={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
+class2type = {type2class[t]:t for t in type2class}
+type2onehotclass={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
+type_mean_size = {'bathtub': np.array([0.765840,1.398258,0.472728]),
+                  'bed': np.array([2.114256,1.620300,0.927272]),
+                  'bookshelf': np.array([0.404671,1.071108,1.688889]),
+                  'chair': np.array([0.591958,0.552978,0.827272]),
+                  'desk': np.array([0.695190,1.346299,0.736364]),
+                  'dresser': np.array([0.528526,1.002642,1.172878]),
+                  'night_stand': np.array([0.500618,0.632163,0.683424]),
+                  'sofa': np.array([0.923508,1.867419,0.845495]),
+                  'table': np.array([0.791118,1.279516,0.718182]),
+                  'toilet': np.array([0.699104,0.454178,0.756250])}
 
-def mask_to_indices(mask):
-    indices = torch.zeros((mask.shape[0], npoints, 2), dtype=torch.int32)
+g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
+for i in range(NUM_SIZE_CLUSTER):
+    g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
+
+def make_oh_vector():
+    pass
+
+# TODO: check mask_to_indices and gather_object_pc
+
+def mask_to_indices(mask, npoints):
+    indices = torch.zeros((mask.shape[0], npoints), dtype=torch.long)
     for i in range(mask.shape[0]):
         pos_indices = torch.where(mask[i,:]>0.5, mask[i, :], mask[i, :])[0]
         # skip cases when pos_indices is empty
-        if len(pos_indices) > 0: 
+        if len(pos_indices.size()) > 0: 
             if len(pos_indices) > npoints:
                 choice = np.random.choice(len(pos_indices), npoints, replace=False)
             else:
                 choice = np.random.choice(len(pos_indices), npoints-len(pos_indices), replace=True)
                 choice = np.concatenate((np.arange(len(pos_indices)), choice))
             choice = torch.from_numpy(np.random.shuffle(choice))
-            for j in range(C):
-                indices[i,:,j] = torch.gather(pos_indices, 0, choice)
-        # indices[i,:,0] = i
+            indices[i] = choice #torch.gather(pos_indices, 0, choice)
+    
     return indices
 
-def gather_object_pc(point_cloud, mask, npoints):
+def gather_object_pc(point_cloud, mask, npoints=512): 
     ''' Gather object point clouds according to predicted masks.
     Input:
         point_cloud: TF tensor in shape (B,N,C)
@@ -48,11 +53,12 @@ def gather_object_pc(point_cloud, mask, npoints):
         npoints: int scalar, maximum number of points to keep (default: 512)
     Output:
         object_pc: TF tensor in shape (B,npoint,C)
-        indices: TF int tensor in shape (B,npoint,2)
+        indices: TF int tensor in shape (B,npoint)
     '''
-    C = point_cloud.shape[-1]
-    indices = mask_to_indices(mask, C)  
-    object_pc = torch.gather(point_cloud, 1,  indices)
+    # C = point_cloud.shape[-1]
+    indices = mask_to_indices(mask, npoints)
+    object_pc = torch.cat([point_cloud[i, j, :] for i, j in enumerate(indices)])
+    # object_pc = torch.gather(point_cloud, 0,  indices)
     return object_pc, indices
 
 def get_box3d_corners_helper(centers, headings, sizes):
@@ -106,24 +112,26 @@ def get_box3d_corners(center, heading_residuals, size_residuals):
     return tf.reshape(corners_3d, [batch_size, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, 8, 3])
 
 def masking(point_cloud, segmentation):
-    mask = segmentation[:, :, 0] < segmentation[:, :, 1] # BxNx1
+    mask = (segmentation[:, :, 0] < segmentation[:, :, 1]).type(torch.FloatTensor).unsqueeze(2) # BxNx1
     mask_count = torch.sum(mask, 1).repeat(1, 1, 3) # Bx1x3
+    
     batch_size = point_cloud.size()[0]
     num_point = point_cloud.size()[1]
-
     point_cloud_xyz = point_cloud[:, :, :3] #torch.narrow(point_cloud, 2, 0, 3) # BxNx3
-    mask_xyz_mean = torch.sum(mask.repeat(1, 1, 3)*point_cloud_xyz, 1)/torch.max(mask_count,1) # Bx1x3
+    mask_xyz_mean = torch.sum(mask.repeat(1, 1, 3)*point_cloud_xyz, 1)/torch.max(mask_count,1)[0] # Bx1x3
     mask = mask.squeeze(2) # BxN
+    
     # Translate to masked points' centroid
     point_cloud_xyz_stage1 = point_cloud_xyz - \
-        mask_xyz_mean.repeat(1,num_point,1)
-
-    num_channels = point_cloud_xyz_stage.size()[-1]
+        mask_xyz_mean.repeat(1, num_point, 1)
     
-    object_point_cloud, _ = gather_object_pc(point_cloud_stage1, mask, NUM_OBJECT_POINT)
-    object_point_cloud = object_point_cloud.view(batch_size, NUM_OBJECT_POINT, num_channels)
+    # num_channels = point_cloud_xyz_stage1.size()[-1]
+    
+    # object_point_cloud, _ = gather_object_pc(point_cloud_xyz_stage1, mask)
+    # print(object_point_cloud.shape)
+    # object_point_cloud = object_point_cloud.view(batch_size, num_point, num_channels)
 
-    return mask, object_point_cloud, mask_xyz_mean
+    return mask, point_cloud_xyz_stage1, mask_xyz_mean # object_point_cloud, mask_xyz_mean
 
 # Loss Functions
 
@@ -153,10 +161,6 @@ def loss(mask_label, center_label, \
         total_loss: scalar tensor
             the total_loss is also added to the losses collection
     '''
-    # 2dNet loss
-
-    net2d_loss = #?
-
     # 3D Segmentation loss
     mask_loss = torch.mean(F.nll_loss(F.softmax(\
         pipeline_output['mask_logits'], mask_label)))
@@ -179,12 +183,11 @@ def loss(mask_label, center_label, \
     heading_residual_normalized_label = \
         heading_residual_label / (np.pi/NUM_HEADING_BIN)
     heading_residual_normalized_loss = huber_loss(torch.sum( \
-        pipeline_output['heading_residuals_normalized']*hcls_onehot.float()), 1) - \
+        pipeline_output['heading_residuals_normalized']*hcls_onehot.float(), 1) - \
         heading_residual_normalized_label, delta=1.0)
     
     # Size loss
-    size_class_loss = torch.mean( /
-            F.nll_loss(F.softmax(pipeline_output['size_scores']), size_class_label))
+    size_class_loss = torch.mean(F.nll_loss(F.softmax(pipeline_output['size_scores']), size_class_label))
     
     scls_onehot = torch.nn.functional.one_hot(size_class_label,
         depth=NUM_SIZE_CLUSTER) # BxNUM_SIZE_CLUSTER
