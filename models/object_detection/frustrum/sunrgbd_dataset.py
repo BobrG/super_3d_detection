@@ -10,6 +10,8 @@ from PIL import Image
 import numpy as np
 import scipy.io
 
+from utils import get_pc, get_center_view_rot_angle
+
 NUM_HEADING_BIN = 12
 NUM_SIZE_CLUSTER = 10
 NUM_CLASS = 10
@@ -31,50 +33,6 @@ type_mean_size = {'bathtub': np.array([0.765840,1.398258,0.472728]),
 g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
 for i in range(NUM_SIZE_CLUSTER):
     g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
-
-def get_pc(depthmap, Rtilt, K):
-        rows, cols = depthmap.shape
-        cx, cy = K[0,2], K[1,2]
-        fx, fy = K[0,0], K[1,1]
-        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-        # c = torch.FloatTensor(c)
-        # r = torch.FloatTensor(r)
-        c = c + .5
-        r = r + .5
-        
-        positive = depthmap > 0.
-        finite = np.isfinite(depthmap)
-        valid = np.logical_and(positive, finite)
-
-        x = np.where(valid, (c - cx) / fx, 0)
-        y = np.where(valid, (r - cy) / fy, 0)
-        z = np.ones_like(depthmap)
-        
-        to_pixels_in_world = np.dstack((x, y, z))
-        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
-        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
-        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
-        res = flip_axis_to_depth(pts_3d_matrix)
-
-        res = np.transpose(np.dot(np.transpose(Rtilt),np.transpose(pts_3d_matrix.reshape(-1, 3))))
-        
-        return res
-
-def get_center_view_rot_angle(angle):
-        return np.pi/2.0 + angle
-
-def correct_pc(pc, rotate_to_center, npoints):
-    if rotate_to_center:
-        # Input ps is NxC points with first 3 channels as XYZ
-        # z is facing forward, x is left ward, y is downward
-        new_pc = rotate_pc_along_y(np.copy(pc),
-                                        get_center_view_rot_angle(frustum_angle))
-    else:
-        new_pc = np.copy(pc)
-    # Resample point cloud
-    choice = np.random.choice(new_pc.shape[0], npoints, replace=True)
-
-    return new_pc[choice, :]
 
 def angle2class(angle, num_class):
     ''' Convert continuous angle to discrete class
@@ -219,11 +177,13 @@ class SUNRGBD(Dataset):
             # tmp['basis'] = dat[0]
             # tmp['orientation'] = dat[-3]
             tmp['gt_bb2d'] = dat[-2] # xmin,ymin,xmax,ymax
+            xmin,ymin,xmax,ymax = dat[-2]
             obj_type = dat[4]
             heading_angle = -1 * np.arctan2(dat[-3][1], dat[-3][0])
             
             # Get frustum angle (according to center pixel in 2D BOX)
             # TODO: understand why authors recreate a point cloud from random depth
+            # TODO: decide where to compute frustum angle
             
             box2d_center = np.array([(xmin+xmax)/2.0, (ymin+ymax)/2.0])
             uvdepth = np.zeros((1,3))
@@ -246,7 +206,6 @@ class SUNRGBD(Dataset):
             if self.rotate_to_center:
                 heading_angle -= - rot_angle
             tmp['angle_class'], tmp['angle_residual'] = angle2class(heading_angle, NUM_HEADING_BIN)
-            
 
             # Get center point and size of 3D box
 
@@ -263,7 +222,7 @@ class SUNRGBD(Dataset):
             # labeling points for gt boxes aka segmentation
 
             box_inds = (point_cloud[:,0]<xmax) & (point_cloud[:,0]>=xmin) & (point_cloud[:,1]<ymax) & (point_cloud[:,1]>=ymin)
-            pc_in_box_fov = pc_upright_camera[box_fov_inds,:]
+            pc_in_box_fov = pc_upright_camera[box_inds,:]
 
             _, inds = extract_pc_in_box3d(pc_in_box_fov, box3d_pts_3d)
             label = np.zeros((pc_in_box_fov.shape[0]))
@@ -320,7 +279,7 @@ class SUNRGBD(Dataset):
     def project_upright_depth_to_upright_camera(self, pc):
         return self.flip_axis_to_camera(pc)
 
-    def project_upright_depth_to_image(pc, rtilt):
+    def project_upright_depth_to_image(self, pc, rtilt):
         ''' 
             project point cloud from depth coord to camera coordinate
                 Input: (N,3) Output: (N,3)
