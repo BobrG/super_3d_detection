@@ -32,8 +32,49 @@ g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
 for i in range(NUM_SIZE_CLUSTER):
     g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
 
-def get_center_view_rot_angle(self, angle):
+def get_pc(depthmap, Rtilt, K):
+        rows, cols = depthmap.shape
+        cx, cy = K[0,2], K[1,2]
+        fx, fy = K[0,0], K[1,1]
+        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
+        # c = torch.FloatTensor(c)
+        # r = torch.FloatTensor(r)
+        c = c + .5
+        r = r + .5
+        
+        positive = depthmap > 0.
+        finite = np.isfinite(depthmap)
+        valid = np.logical_and(positive, finite)
+
+        x = np.where(valid, (c - cx) / fx, 0)
+        y = np.where(valid, (r - cy) / fy, 0)
+        z = np.ones_like(depthmap)
+        
+        to_pixels_in_world = np.dstack((x, y, z))
+        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
+        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
+        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
+        res = flip_axis_to_depth(pts_3d_matrix)
+
+        res = np.transpose(np.dot(np.transpose(Rtilt),np.transpose(pts_3d_matrix.reshape(-1, 3))))
+        
+        return res
+
+def get_center_view_rot_angle(angle):
         return np.pi/2.0 + angle
+
+def correct_pc(pc, rotate_to_center, npoints):
+    if rotate_to_center:
+        # Input ps is NxC points with first 3 channels as XYZ
+        # z is facing forward, x is left ward, y is downward
+        new_pc = rotate_pc_along_y(np.copy(pc),
+                                        get_center_view_rot_angle(frustum_angle))
+    else:
+        new_pc = np.copy(pc)
+    # Resample point cloud
+    choice = np.random.choice(new_pc.shape[0], npoints, replace=True)
+
+    return new_pc[choice, :]
 
 def angle2class(angle, num_class):
     ''' Convert continuous angle to discrete class
@@ -130,112 +171,6 @@ def get_center_view_box3d_center(box3d):
     box3d_center = (box3d[0,:] + box3d[index][6,:])/2.0
     return rotate_pc_along_y(np.expand_dims(box3d_center,0), get_center_view_rot_angle(index)).squeeze()
 
-def extract_roi_seg(idx_filename, split, output_filename, viz, perturb_box2d=False, augmentX=1, type_whitelist=['bed','table','sofa','chair','toilet','desk','dresser','night_stand','bookshelf','bathtub']):
-    dataset = sunrgbd_object('/home/rqi/Data/mysunrgbd', split)
-    data_idx_list = [int(line.rstrip()) for line in open(idx_filename)]
-
-    id_list = [] # int number
-    box2d_list = [] # [xmin,ymin,xmax,ymax]
-    box3d_list = [] # (8,3) array in upright depth coord
-    input_list = [] # channel number = 6, xyz,rgb in upright depth coord
-    label_list = [] # 1 for roi object, 0 for clutter
-    type_list = [] # string e.g. bed
-    heading_list = [] # face of object angle, radius of clockwise angle from positive x axis in upright camera coord
-    box3d_size_list = [] # array of l,w,h
-    frustum_angle_list = [] # angle of 2d box center from pos x-axis (clockwise)
-
-    pos_cnt = 0
-    all_cnt = 0
-    for data_idx in data_idx_list:
-        print('------------- ', data_idx)
-
-
-        # get data 
-        calib = dataset.get_calibration(data_idx)
-        objects = dataset.get_label_objects(data_idx)
-        pc_upright_depth = dataset.get_depth(data_idx)
-        pc_upright_camera = np.zeros_like(pc_upright_depth)
-
-
-        # get point cloud
-        pc_upright_camera[:,0:3] = calib.project_upright_depth_to_upright_camera(pc_upright_depth[:,0:3])
-        pc_upright_camera[:,3:] = pc_upright_depth[:,3:]
-
-
-        img = dataset.get_image(data_idx)
-        img_height, img_width, img_channel = img.shape
-        pc_image_coord,_ = calib.project_upright_depth_to_image(pc_upright_depth)
-        
-        for obj_idx in range(len(objects)):
-            obj = objects[obj_idx]
-            if obj.classname not in type_whitelist: continue
-
-            # 2D BOX: Get pts rect backprojected 
-            box2d = obj.box2d
-            for _ in range(augmentX):
-                try:
-                    # Augment data by box2d perturbation
-                    if perturb_box2d:
-                        xmin,ymin,xmax,ymax = random_shift_box2d(box2d)
-                        print(xmin,ymin,xmax,ymax)
-                    else:
-                        xmin,ymin,xmax,ymax = box2d
-                    box_fov_inds = (pc_image_coord[:,0]<xmax) & (pc_image_coord[:,0]>=xmin) & (pc_image_coord[:,1]<ymax) & (pc_image_coord[:,1]>=ymin)
-                    pc_in_box_fov = pc_upright_camera[box_fov_inds,:]
-                    # Get frustum angle (according to center pixel in 2D BOX)
-                    box2d_center = np.array([(xmin+xmax)/2.0, (ymin+ymax)/2.0])
-                    uvdepth = np.zeros((1,3))
-                    uvdepth[0,0:2] = box2d_center
-                    uvdepth[0,2] = 20 # some random depth
-                    box2d_center_upright_camera = calib.project_image_to_upright_camerea(uvdepth)
-                    print('UVdepth, center in upright camera: ', uvdepth, box2d_center_upright_camera)
-                    frustum_angle = -1 * np.arctan2(box2d_center_upright_camera[0,2], box2d_center_upright_camera[0,0]) # angle as to positive x-axis as in the Zoox paper
-                    print('Frustum angle: ', frustum_angle)
-                    # 3D BOX: Get pts velo in 3d box
-                    box3d_pts_2d, box3d_pts_3d = utils.compute_box_3d(obj, calib) 
-                    box3d_pts_3d = calib.project_upright_depth_to_upright_camera(box3d_pts_3d)
-                    _,inds = extract_pc_in_box3d(pc_in_box_fov, box3d_pts_3d)
-                    print(len(inds))
-                    label = np.zeros((pc_in_box_fov.shape[0]))
-                    label[inds] = 1
-                    # Get 3D BOX heading
-                    print('Orientation: ', obj.orientation)
-                    print('Heading angle: ', obj.heading_angle)
-                    # Get 3D BOX size
-                    box3d_size = np.array([2*obj.l,2*obj.w,2*obj.h])
-                    print('Box3d size: ', box3d_size)
-                    print('Type: ', obj.classname)
-                    print('Num of point: ', pc_in_box_fov.shape[0])
-                    
-                    # Subsample points..
-                    num_point = pc_in_box_fov.shape[0]
-                    if num_point > 2048:
-                        choice = np.random.choice(pc_in_box_fov.shape[0], 2048, replace=False)
-                        pc_in_box_fov = pc_in_box_fov[choice,:]
-                        label = label[choice]
-                    # Reject object with too few points
-                    if np.sum(label) < 5:
-                        continue
-
-                    id_list.append(data_idx)
-                    box2d_list.append(np.array([xmin,ymin,xmax,ymax]))
-                    box3d_list.append(box3d_pts_3d)
-                    input_list.append(pc_in_box_fov)
-                    label_list.append(label)
-                    type_list.append(obj.classname)
-                    heading_list.append(obj.heading_angle)
-                    box3d_size_list.append(box3d_size)
-                    frustum_angle_list.append(frustum_angle)
-    
-                    # collect statistics
-                    pos_cnt += np.sum(label)
-                    all_cnt += pc_in_box_fov.shape[0]
-       
-    print('Average pos ratio: ', pos_cnt/float(all_cnt))
-    print('Average npoints: ', float(all_cnt)/len(id_list))
-
-    utils.save_zipped_pickle([id_list,box2d_list,box3d_list,input_list,label_list,type_list,heading_list,box3d_size_list,frustum_angle_list],output_filename)
-
 class SUNRGBD(Dataset):
     def __init__(self, toolbox_root_path, npoints, rotate_to_center):
         self.toolbox_root_path = toolbox_root_path
@@ -243,7 +178,6 @@ class SUNRGBD(Dataset):
         self.ds_len = self.meta.shape[0]
         self.rotate_to_center = rotate_to_center
         self.npoints = npoints
-
 
     def __len__(self):
         return self.ds_len
@@ -267,7 +201,7 @@ class SUNRGBD(Dataset):
 
         sample['K'] = self.meta[idx][3]
         sample['Rtilt'] = self.meta[idx][2] 
-        point_cloud = self.get_pc(depth, sample['Rtilt'], sample['K'])
+        point_cloud = get_pc(depth, sample['Rtilt'], sample['K'])
         
         # ---------------------------------- collecting target data ---------------------------------
         # gt_bb3d metadata construction
@@ -347,21 +281,6 @@ class SUNRGBD(Dataset):
 
             sample['target'].append(tmp)
 
-        # --------------------------------- manipulation with data ---------------------------------
-        # should be done after receiving 2d detector's predictions
-        # TODO: move to the model's forward method
-
-        # if self.rotate_to_center:
-        #     # Input ps is NxC points with first 3 channels as XYZ
-        #     # z is facing forward, x is left ward, y is downward
-        #     point_cloud = rotate_pc_along_y(np.copy(point_cloud),
-        #                                     self.get_center_view_rot_angle(frustum_angle))
-        
-        # Resample point cloud
-        # choice = np.random.choice(point_cloud.shape[0], self.npoints, replace=True)
-        # point_cloud = point_cloud[choice, :]
-        # sample['point_cloud'] = point_cloud
-
         # ------------------------------------ END ------------------------------------
 
         return sample
@@ -409,34 +328,6 @@ class SUNRGBD(Dataset):
         # Project upright depth to depth coordinate
         pc2 = np.dot(np.transpose(rtilt), np.transpose(pc[:,0:3])) # (3,n)
         return self.flip_axis_to_camera(np.transpose(pc2)) 
-
-    def get_pc(self, depthmap, Rtilt, K):
-        rows, cols = depthmap.shape
-        cx, cy = K[0,2], K[1,2]
-        fx, fy = K[0,0], K[1,1]
-        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-        # c = torch.FloatTensor(c)
-        # r = torch.FloatTensor(r)
-        c = c + .5
-        r = r + .5
-        
-        positive = depthmap > 0.
-        finite = np.isfinite(depthmap)
-        valid = np.logical_and(positive, finite)
-
-        x = np.where(valid, (c - cx) / fx, 0)
-        y = np.where(valid, (r - cy) / fy, 0)
-        z = np.ones_like(depthmap)
-        
-        to_pixels_in_world = np.dstack((x, y, z))
-        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
-        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
-        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
-        res = flip_axis_to_depth(pts_3d_matrix)
-
-        res = np.transpose(np.dot(np.transpose(Rtilt),np.transpose(pts_3d_matrix.reshape(-1, 3))))
-        
-        return res
         
     def project_image_to_upright_camera(self, uv_depth, Rtilt, K):
         pts_3d_camera = self.project_image_to_camera(uv_depth, K)

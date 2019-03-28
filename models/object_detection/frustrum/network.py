@@ -3,10 +3,9 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models 
 import numpy as np
-from utils import masking, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, g_mean_size_arr
+from utils import masking, get_pc, correct_pc, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, g_mean_size_arr
 from components import T_Net, Box_Estimation_Net, Seg_PointNet
 from easy_detection_2d.model import SSD300, MultiBoxLoss
-from sunrgbd_dataset import pc_from_rgbd
 import cv2
 
 class object_detection_model(nn.Module):
@@ -21,15 +20,14 @@ class object_detection_model(nn.Module):
     def forward(self, rgb, data, sample=None, one_hot=False):
         output = {}
         batch_size = data.shape[0]
+
         # 2D detection: 
         # input batch x channels x height x width
         # output 
         # im_info = torch.from_numpy(sample['im_info']).float()
         # bb_gt = torch.from_numpy(sample['bb_gt']).float()
         # num_boxes = torch.from_numpy(sample['num_boxes']).float()
-
         predicted_locs, predicted_scores = self.cnn2d(rgb) # (B, 8732, 4), (B, 8732, n_classes)
-
         output['pred_bb'] = predicted_locs 
         
         if one_hot:
@@ -39,7 +37,10 @@ class object_detection_model(nn.Module):
 
         point_cloud = torch.zeros((int(batch_size), 3, int(self.num_points))) # batch x num_points x 3 !!! check how to make 4 channels
         for i in range(batch_size):
-            point_cloud[i] = pc_from_rgbd(data[i], Rtilt=sample['Rtilt'][i], K=sample['K'][i]).permute(1, 0)
+            tmp = get_pc(data[i], Rtilt=sample['Rtilt'][i], K=sample['K'][i]).permute(1, 0)
+            point_cloud[i] = correct_pc(tmp, sample['rotate_to_center'], self.num_points) 
+        
+        # TODO: add function for cropping point cloud of "objects"
 
         # 3D Instance Segmentation PointNet
         # input batch x num_points x 3
@@ -47,6 +48,7 @@ class object_detection_model(nn.Module):
         mlp_output = self.seg_net[0](point_cloud) # mlp1, torch.Size([1, 64, num_points])
         global_feature = self.seg_net[2](self.seg_net[1](mlp_output)).squeeze(2) # mlp2 -> maxpool, torch.Size([B, 1024])
         global_feature_repeated = global_feature.unsqueeze(-1).repeat(1, 1, self.num_points) # torch.Size([B, 1024, num_points])
+
         if onehot_vec is not None:
             output_scores = self.seg_net[-1](
                                                 torch.cat([onehot_vec, mlp_output, global_feature_repeated], 1) # !!! 
@@ -55,7 +57,7 @@ class object_detection_model(nn.Module):
             output_scores = self.seg_net[-1](
                                                 torch.cat([mlp_output, global_feature_repeated], 1) # torch.Size([B, 1088, num_points])
                                             )
-        
+
         # concatenation -> mlp3
         output['mask_logits'] = output_scores # num_points x (1088 + k) 
 
@@ -106,7 +108,6 @@ class object_detection_model(nn.Module):
         size_residuals_normalized = size_residuals_normalized.view(batch_size, NUM_SIZE_CLUSTER, 3) # BxNUM_SIZE_CLUSTERx3
         output['size_scores'] = size_scores
         output['size_residuals_normalized'] = size_residuals_normalized
-        print(size_residuals_normalized.dtype)
         output['size_residuals'] = size_residuals_normalized * torch.FloatTensor(g_mean_size_arr).unsqueeze(0)
 
         output['center_prediction'] = output['center_boxnet'] + center_1 # Bx3 (C_mask + delta_C_tnet) + delta_C_boxnet

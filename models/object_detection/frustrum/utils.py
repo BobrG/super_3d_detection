@@ -1,33 +1,103 @@
 import torch
 import numpy as np
 from torch.nn import functional as F
-
-NUM_HEADING_BIN = 12
-NUM_SIZE_CLUSTER = 10
-NUM_CLASS = 10
-
-type2class={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
-class2type = {type2class[t]:t for t in type2class}
-type2onehotclass={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
-type_mean_size = {'bathtub': np.array([0.765840,1.398258,0.472728]),
-                  'bed': np.array([2.114256,1.620300,0.927272]),
-                  'bookshelf': np.array([0.404671,1.071108,1.688889]),
-                  'chair': np.array([0.591958,0.552978,0.827272]),
-                  'desk': np.array([0.695190,1.346299,0.736364]),
-                  'dresser': np.array([0.528526,1.002642,1.172878]),
-                  'night_stand': np.array([0.500618,0.632163,0.683424]),
-                  'sofa': np.array([0.923508,1.867419,0.845495]),
-                  'table': np.array([0.791118,1.279516,0.718182]),
-                  'toilet': np.array([0.699104,0.454178,0.756250])}
-
-g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
-for i in range(NUM_SIZE_CLUSTER):
-    g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
+from sunrgbd_dataset import NUM_HEADING_BIN, NUM_SIZE_CLUSTER, NUM_CLASS, g_mean_size_arr, flip_axis_to_depth, rotate_pc_along_y 
 
 def make_oh_vector():
     pass
 
 # TODO: check mask_to_indices and gather_object_pc
+
+# --------------------------------- DATASET MANIPULATIONS ---------------------------------
+
+def get_pc(depthmap, Rtilt, K):
+        rows, cols = depthmap.shape
+        cx, cy = K[0,2], K[1,2]
+        fx, fy = K[0,0], K[1,1]
+        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
+        c = torch.FloatTensor(c)
+        r = torch.FloatTensor(r)
+        c = c + .5
+        r = r + .5
+        
+        positive = depthmap > 0.
+        finite = np.isfinite(depthmap)
+        valid = np.logical_and(positive, finite)
+
+        x = np.where(valid, (c - cx) / fx, 0)
+        y = np.where(valid, (r - cy) / fy, 0)
+        z = np.ones_like(depthmap)
+        
+        to_pixels_in_world = np.dstack((x, y, z))
+        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
+        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
+        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
+
+        res = torch.t(torch.mm(torch.t(Rtilt), torch.t(torch.reshape(pts_3d_matrix, (-1, 3)))))
+        
+        return res
+
+def get_center_view_rot_angle(angle):
+        return np.pi/2.0 + angle
+
+def correct_pc(pc, rotate_to_center, npoints, angle):
+
+    if rotate_to_center:
+        # Input ps is NxC points with first 3 channels as XYZ
+        # z is facing forward, x is left ward, y is downward
+        new_pc = rotate_pc_along_y(pc, get_center_view_rot_angle(angle))
+    else:
+        new_pc = pc
+    # Resample point cloud
+    # TODO: add resample which expands amount of points
+    choice = np.random.choice(new_pc.shape[0], npoints, replace=True)
+
+    return new_pc[choice, :]
+
+def extract_objects(pc, coords, npoints, sample):
+    res = torch.zeros((coords.shape[0], npoints, 3))
+    # for sunrgbd:
+    # same shit as in sunrgbd_datase string 170
+    pc_ = pc.permute(0, 2, 1)
+    pc_[:, -1] *= -1.0 
+    K = sample['K']
+    Rtilt = sample['Rtilt']
+
+    for box in coords:
+        xmin,ymin,xmax,ymax = box
+        box_inds = (pc_[:,0]<xmax) & (pc_[:,0]>=xmin) & (pc_[:,1]<ymax) & (pc_[:,1]>=ymin)
+        box2d_center = np.array([(xmin+xmax)/2.0, (ymin+ymax)/2.0])
+        pc_cut = pc_[box_inds, :]
+
+        uvdepth = torch.zeros((1,3))
+        uvdepth[0,0:2] = box2d_center
+        uvdepth[0,2] = 20 # some random depth
+
+        n = uvdepth.shape[0]
+        c_u, c_v = K[0,2], K[1,2]
+        f_u, f_v = K[0,0], K[1,1]
+
+        x = ((uvdepth[:,0] - c_u)*uvdepth[:,2])/f_u
+        y = ((uvdepth[:,1] - c_v)*uvdepth[:,2])/f_v
+        pts_3d_camera = torch.zeros((n,3))
+        pts_3d_camera[:,0] = x
+        pts_3d_camera[:,1] = uvdepth[:,2]
+        pts_3d_camera[:,2] = -1*y
+        pts_3d_camera = torch.t(
+                                torch.mm(torch.t(Rtilt),
+                                torch.t(pts_3d_matrix[:, 0:3]))
+                               ).permute(0, 2, 1)
+        pts_3d_camera[:, -1] *= -1
+
+        box2d_center_upright_camera = pts_3d_camera
+        
+        frustum_angle = -1 * torch.atan2(box2d_center_upright_camera[0,2],
+                                    box2d_center_upright_camera[0,0]) # angle as to positive x-axis as in the Zoox paper
+        res[i] = correct_pc(pc_cut, sample['rotate_to_center'], npoints, frustum_angle)
+
+    return res
+
+# --------------------------------- NN DATA MANIPULATIONS ---------------------------------
 
 def mask_to_indices(mask, npoints):
     indices = torch.zeros((mask.shape[0], npoints), dtype=torch.long)
@@ -112,13 +182,20 @@ def get_box3d_corners(center, heading_residuals, size_residuals):
     return tf.reshape(corners_3d, [batch_size, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, 8, 3])
 
 def masking(point_cloud, segmentation):
-    mask = (segmentation[:, :, 0] < segmentation[:, :, 1]).type(torch.FloatTensor).unsqueeze(2) # BxNx1
-    mask_count = torch.sum(mask, 1).repeat(1, 1, 3) # Bx1x3
-    
     batch_size = point_cloud.size()[0]
     num_point = point_cloud.size()[1]
+
+    mask = (segmentation[:, :, 0] < segmentation[:, :, 1]).type(torch.FloatTensor).unsqueeze(2) # BxNx1
+    mask_count = torch.sum(mask, 1).repeat(1, 1, 3) # Bx1x3
     point_cloud_xyz = point_cloud[:, :, :3] #torch.narrow(point_cloud, 2, 0, 3) # BxNx3
-    mask_xyz_mean = torch.sum(mask.repeat(1, 1, 3)*point_cloud_xyz, 1)/torch.max(mask_count,1)[0] # Bx1x3
+    max_ = torch.max(mask_count,1)[0]
+
+    if len(max_[max_ == 0.0].size()) == 0:
+        mask_xyz_mean = torch.sum(mask.repeat(1, 1, 3)*point_cloud_xyz, 1)/max_ # Bx1x3
+    else:
+        max_[max_ == 0.0] = 1.0
+        mask_xyz_mean = torch.sum(mask.repeat(1, 1, 3)*point_cloud_xyz, 1)/max_
+    
     mask = mask.squeeze(2) # BxN
     
     # Translate to masked points' centroid
@@ -133,7 +210,7 @@ def masking(point_cloud, segmentation):
 
     return mask, point_cloud_xyz_stage1, mask_xyz_mean # object_point_cloud, mask_xyz_mean
 
-# Loss Functions
+# --------------------------------- LOSS FUNCTIONS ---------------------------------
 
 def huber_loss(error, delta):
     abs_error = torch.abs(error)
@@ -142,21 +219,20 @@ def huber_loss(error, delta):
     losses = 0.5 * quadratic**2 + delta * linear
     return torch.mean(losses)
 
-def loss(mask_label, center_label, \
-         heading_class_label, heading_residual_label, \
-         size_class_label, size_residual_label, \
-         pipeline_output, corner_loss_weight):
+def loss(pipeline_output, target, corner_loss_weight=0.001):
     ''' Loss function for 3D object detection pipeline.
     Input:
-        mask_label:  shape (B,N)
-        center_label:  shape (B,3)
-        heading_class_label:  shape (B,) 
-        heading_residual_label: shape (B,) 
-        size_class_label: shape (B,)
-        size_residual_label: shape (B,)
-        end_points: dict, outputs from our model
-        corner_loss_weight: float scalar
-        box_loss_weight: float scalar
+        pipeline_output: dict, outputs from our model
+       
+        sample['target']:
+            label_list = mask_label:  shape (B,N)
+            box3d_center = center_label:  shape (B,3)
+            heading_class_label:  shape (B,) 
+            heading_residual_label: shape (B,) 
+            size_class_label: shape (B,)
+            size_residual_label: shape (B,)
+            corner_loss_weight: float scalar
+            box_loss_weight: float scalar
     Output:
         total_loss: scalar tensor
             the total_loss is also added to the losses collection
