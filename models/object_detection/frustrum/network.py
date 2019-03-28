@@ -3,16 +3,19 @@ from torch import nn
 from torch.nn import functional as F
 from torchvision import models 
 import numpy as np
-from utils import masking, get_pc, correct_pc, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, g_mean_size_arr
+from utils import masking, get_pc, correct_pc, extract_objects, NUM_HEADING_BIN, NUM_SIZE_CLUSTER, NUM_CLASS, g_mean_size_arr
 from components import T_Net, Box_Estimation_Net, Seg_PointNet
 from easy_detection_2d.model import SSD300, MultiBoxLoss
 import cv2
 
 class object_detection_model(nn.Module):
-    def __init__(self, num_points, cnn2d, seg_net, tnet, box_est):
+    def __init__(self, num_points, cnn2d, seg_net, tnet, box_est, min_score=0.2, max_overlap=0.5, top_k=5):
         super(object_detection_model, self).__init__()
         self.num_points = int(num_points)
         self.cnn2d = cnn2d # pass initialized model class
+        self.min_score = min_score
+        self.max_overlap = max_overlap
+        self.top_k = top_k
         self.seg_net = nn.ModuleList(seg_net(self.num_points))
         self.tnet = nn.ModuleList(tnet(self.num_points))
         self.box_est = nn.ModuleList(box_est(self.num_points, NUM_SIZE_CLUSTER, NUM_HEADING_BIN))
@@ -23,29 +26,39 @@ class object_detection_model(nn.Module):
 
         # 2D detection: 
         # input batch x channels x height x width
-        # output 
-        # im_info = torch.from_numpy(sample['im_info']).float()
-        # bb_gt = torch.from_numpy(sample['bb_gt']).float()
-        # num_boxes = torch.from_numpy(sample['num_boxes']).float()
         predicted_locs, predicted_scores = self.cnn2d(rgb) # (B, 8732, 4), (B, 8732, n_classes)
-        output['pred_bb'] = predicted_locs 
-        
+        output['pred_bb'] = predicted_locs
+        output['pred_scores'] = preducted_scores
+    
         if one_hot:
             onehot_vec = make_oh_vector()
         else:
             onehot_vec = None 
 
         point_cloud = torch.zeros((int(batch_size), 3, int(self.num_points))) # batch x num_points x 3 !!! check how to make 4 channels
+        objects_pc = []
+
+        # extracting objects from point clounds
         for i in range(batch_size):
             tmp = get_pc(data[i], Rtilt=sample['Rtilt'][i], K=sample['K'][i]).permute(1, 0)
-            point_cloud[i] = correct_pc(tmp, sample['rotate_to_center'], self.num_points) 
-        
-        # TODO: add function for cropping point cloud of "objects"
+            det_boxes, det_labels, det_scores = self.cnn2d.detect_objects(
+                                                                      predicted_locs[i], predicted_scores[i],
+                                                                      min_score=self.min_score, 
+                                                                      max_overlap=self.max_overlap, 
+                                                                      top_k=self.top_k
+                                                                     ) # (n_objects, 4), (n_objects), (n_objects)
+
+            # objects = torch.zeros(())
+            objects = extract_objects(tmp[i], det_boxes, sample['rotate_to_center'], self.num_points)
+            objects_pc.append(objects)
+            
+        # tensor with cropped objects 
+        objects_pc_tensor = torch.cat(objects_pc, 0)
 
         # 3D Instance Segmentation PointNet
         # input batch x num_points x 3
         # output 
-        mlp_output = self.seg_net[0](point_cloud) # mlp1, torch.Size([1, 64, num_points])
+        mlp_output = self.seg_net[0](objects_pc_tensor) # mlp1, torch.Size([1, 64, num_points])
         global_feature = self.seg_net[2](self.seg_net[1](mlp_output)).squeeze(2) # mlp2 -> maxpool, torch.Size([B, 1024])
         global_feature_repeated = global_feature.unsqueeze(-1).repeat(1, 1, self.num_points) # torch.Size([B, 1024, num_points])
 
@@ -116,7 +129,7 @@ class object_detection_model(nn.Module):
 
 if __name__ == "__main__":
     num_points = 10e4
-    net = object_detection_model(num_points, SSD300(n_classes=5), Seg_PointNet, T_Net, Box_Estimation_Net)
+    net = object_detection_model(num_points, SSD300(n_classes=NUM_CLASS), Seg_PointNet, T_Net, Box_Estimation_Net)
     net.train()
     sample = {}
     sample['image'] = torch.FloatTensor(cv2.imread('/Users/bobrg/Downloads/sunrgbd/image/NYU1000.jpg')).permute(2, 0, 1).unsqueeze(0)
