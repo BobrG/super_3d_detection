@@ -10,8 +10,6 @@ from PIL import Image
 import numpy as np
 import scipy.io
 
-from utils import get_pc, get_center_view_rot_angle
-
 NUM_HEADING_BIN = 12
 NUM_SIZE_CLUSTER = 10
 NUM_CLASS = 10
@@ -33,6 +31,36 @@ type_mean_size = {'bathtub': np.array([0.765840,1.398258,0.472728]),
 g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
 for i in range(NUM_SIZE_CLUSTER):
     g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
+
+def get_pc(depthmap, Rtilt, K):
+        rows, cols = depthmap.shape
+        cx, cy = K[0,2], K[1,2]
+        fx, fy = K[0,0], K[1,1]
+        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
+        c = torch.FloatTensor(c)
+        r = torch.FloatTensor(r)
+        c = c + .5
+        r = r + .5
+        
+        positive = depthmap > 0.
+        finite = np.isfinite(depthmap)
+        valid = np.logical_and(positive, finite)
+
+        x = np.where(valid, (c - cx) / fx, 0)
+        y = np.where(valid, (r - cy) / fy, 0)
+        z = np.ones_like(depthmap)
+        
+        to_pixels_in_world = np.dstack((x, y, z))
+        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
+        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
+        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
+
+        res = torch.t(torch.mm(torch.t(Rtilt), torch.t(torch.reshape(pts_3d_matrix, (-1, 3)))))
+        
+        return res
+
+def get_center_view_rot_angle(angle):
+        return np.pi/2.0 + angle
 
 def angle2class(angle, num_class):
     ''' Convert continuous angle to discrete class

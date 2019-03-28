@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 from torch.nn import functional as F
-from sunrgbd_dataset import NUM_HEADING_BIN, NUM_SIZE_CLUSTER, NUM_CLASS, g_mean_size_arr, flip_axis_to_depth, rotate_pc_along_y 
+from sunrgbd_dataset import NUM_HEADING_BIN, NUM_SIZE_CLUSTER, NUM_CLASS, g_mean_size_arr, rotate_pc_along_y, get_center_view_rot_angle 
 
 def make_oh_vector():
     pass
@@ -9,36 +9,6 @@ def make_oh_vector():
 # TODO: check mask_to_indices and gather_object_pc
 
 # --------------------------------- DATASET MANIPULATIONS ---------------------------------
-
-def get_pc(depthmap, Rtilt, K):
-        rows, cols = depthmap.shape
-        cx, cy = K[0,2], K[1,2]
-        fx, fy = K[0,0], K[1,1]
-        c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-        c = torch.FloatTensor(c)
-        r = torch.FloatTensor(r)
-        c = c + .5
-        r = r + .5
-        
-        positive = depthmap > 0.
-        finite = np.isfinite(depthmap)
-        valid = np.logical_and(positive, finite)
-
-        x = np.where(valid, (c - cx) / fx, 0)
-        y = np.where(valid, (r - cy) / fy, 0)
-        z = np.ones_like(depthmap)
-        
-        to_pixels_in_world = np.dstack((x, y, z))
-        to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
-        to_pixels_in_world[np.logical_not(valid), 2] = np.nan
-        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
-
-        res = torch.t(torch.mm(torch.t(Rtilt), torch.t(torch.reshape(pts_3d_matrix, (-1, 3)))))
-        
-        return res
-
-def get_center_view_rot_angle(angle):
-        return np.pi/2.0 + angle
 
 def correct_pc(pc, rotate_to_center, npoints, angle):
 
