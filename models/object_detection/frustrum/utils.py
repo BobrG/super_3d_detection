@@ -195,47 +195,46 @@ def loss(pipeline_output, target, corner_loss_weight=0.001):
         pipeline_output: dict, outputs from our model
        
         sample['target']:
-            label_list = mask_label:  shape (B,N)
-            box3d_center = center_label:  shape (B,3)
-            heading_class_label:  shape (B,) 
-            heading_residual_label: shape (B,) 
-            size_class_label: shape (B,)
-            size_residual_label: shape (B,)
+            label:  shape (B,N)
+            box3d_center:  shape (B,3)
+            angle_class:  shape (B,) 
+            angle_residual: shape (B,) 
+            size_class: shape (B,)
+            size_residual: shape (B,)
             corner_loss_weight: float scalar
-            box_loss_weight: float scalar
     Output:
         total_loss: scalar tensor
             the total_loss is also added to the losses collection
     '''
     # 3D Segmentation loss
     mask_loss = torch.mean(F.nll_loss(F.softmax(\
-        pipeline_output['mask_logits'], mask_label)))
+        pipeline_output['mask_logits'], target['label'])))
 
     # Center regression losses
-    center_dist = torch.norm(center_label - end_points['center'], p=2, dim=-1)
+    center_dist = torch.norm(target['box3d_centre'] - end_points['center'], p=2, dim=-1)
     center_loss = huber_loss(center_dist, delta=2.0)
     
-    stage1_center_dist = torch.norm(center_label - \
+    stage1_center_dist = torch.norm(target['box3d_centre'] - \
         pipeline_output['stage1_center'], dim=-1)
     stage1_center_loss = huber_loss(stage1_center_dist, delta=1.0)
     
     # Heading loss
     heading_class_loss = torch.mean( \
         F.nll_loss(F.softmax( \
-        pipeline_output['heading_scores'], heading_class_label)))
+        pipeline_output['heading_scores'], target['angle_class'])))
 
-    hcls_onehot = torch.nn.functional.one_hot(heading_class_label,
+    hcls_onehot = torch.nn.functional.one_hot(target['angle_class'],
         depth=NUM_HEADING_BIN) # BxNUM_HEADING_BIN
     heading_residual_normalized_label = \
-        heading_residual_label / (np.pi/NUM_HEADING_BIN)
+        target['angle_residual'] / (np.pi/NUM_HEADING_BIN)
     heading_residual_normalized_loss = huber_loss(torch.sum( \
         pipeline_output['heading_residuals_normalized']*hcls_onehot.float(), 1) - \
         heading_residual_normalized_label, delta=1.0)
     
     # Size loss
-    size_class_loss = torch.mean(F.nll_loss(F.softmax(pipeline_output['size_scores']), size_class_label))
+    size_class_loss = torch.mean(F.nll_loss(F.softmax(pipeline_output['size_scores']), target['size_class']))
     
-    scls_onehot = torch.nn.functional.one_hot(size_class_label,
+    scls_onehot = torch.nn.functional.one_hot(target['size_class'],
         depth=NUM_SIZE_CLUSTER) # BxNUM_SIZE_CLUSTER
     scls_onehot_tiled = scls_onehot.float().unsqueeze(-1).repeat(1,1,3) # BxNUM_SIZE_CLUSTERx3
     predicted_size_residual_normalized = torch.sum( \
@@ -244,9 +243,9 @@ def loss(pipeline_output, target, corner_loss_weight=0.001):
     mean_size_arr_expand = torch.from_numpy(g_mean_size_arr).unsqueeze(0) # 1xNUM_SIZE_CLUSTERx3
     mean_size_label = torch.sum( \
         scls_onehot_tiled * mean_size_arr_expand, 1) # Bx3
-    size_residual_label_normalized = size_residual_label / mean_size_label
+    target['size_residual']_normalized = target['size_residual'] / mean_size_label
     size_normalized_dist = torch.norm( \
-        size_residual_label_normalized - predicted_size_residual_normalized, p=2,
+        target['size_residual']_normalized - predicted_size_residual_normalized, p=2,
         dim=-1)
     size_residual_normalized_loss = huber_loss(size_normalized_dist, delta=1.0)
 
@@ -263,15 +262,15 @@ def loss(pipeline_output, target, corner_loss_weight=0.001):
         dim=(1,2))# (B,8,3)
 
     heading_bin_centers = torch.from_numpy(np.arange(0,2*np.pi,2*np.pi/NUM_HEADING_BIN)) # (NH,)
-    heading_label = heading_residual_label.unsqueeze(1) + heading_bin_centers.unsqueeze(0) # (B,NH)
+    heading_label = target['angle_residual'].unsqueeze(1) + heading_bin_centers.unsqueeze(0) # (B,NH)
     heading_label = torch.sum(hcls_onehot.float()*heading_label, dim=1)
     mean_sizes = torch.from_numpy(g_mean_size_arr).unsqueeze(0) # (1,NS,3)
-    size_label = mean_sizes + size_residual_label.unsqueeze(1) # (1,NS,3) + (B,1,3) = (B,NS,3)
+    size_label = mean_sizes + target['size_residual'].unsqueeze(1) # (1,NS,3) + (B,1,3) = (B,NS,3)
     size_label = torch.sum(scls_onehot.float().unsqueeze(-1)*size_label, dim=1) # (B,3)
     corners_3d_gt = get_box3d_corners_helper( \
-        center_label, heading_label, size_label) # (B,8,3)
+        target['box3d_centre'], heading_label, size_label) # (B,8,3)
     corners_3d_gt_flip = get_box3d_corners_helper( \
-        center_label, heading_label+np.pi, size_label) # (B,8,3)
+        target['box3d_centre'], heading_label+np.pi, size_label) # (B,8,3)
 
     corners_dist = torch.min(torch.norm(corners_3d_pred - corners_3d_gt, p=2, dim=-1),
         torch.norm(corners_3d_pred - corners_3d_gt_flip, p=2, dim=-1))
