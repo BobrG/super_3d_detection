@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils
 from glob import glob
 import numpy as np
+import scipy.misc as m
 import cv2
 import os
 
@@ -14,7 +15,7 @@ NUM_HEADING_BIN = 12
 NUM_SIZE_CLUSTER = 10
 NUM_CLASS = 10
 
-type2class={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
+type2class = {'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
 class2type = {type2class[t]:t for t in type2class}
 type2onehotclass={'bed':0, 'table':1, 'sofa':2, 'chair':3, 'toilet':4, 'desk':5, 'dresser':6, 'night_stand':7, 'bookshelf':8, 'bathtub':9}
 type_mean_size = {'bathtub': np.array([0.765840,1.398258,0.472728]),
@@ -34,7 +35,6 @@ for i in range(NUM_SIZE_CLUSTER):
 
 # --------------------------------- TODO's ---------------------------------
 
-# TODO: add image resize (img_size=(480, 640)) + consider cropping patches
 # TODO: remove all data transforming part to another function
 # TODO: rewrite get_pc to numpy (optional) 
 
@@ -232,35 +232,34 @@ def get_center_view_box3d_center(box3d):
     return rotate_pc_along_y(np.expand_dims(box3d_center,0), get_center_view_rot_angle(index)).squeeze()
 
 class SUNRGBD(Dataset):
-    def __init__(self, toolbox_root_path, npoints, rotate_to_center, crop=False, crop_sz=0.0):
+    def __init__(self, toolbox_root_path, npoints, rotate_to_center, im_sz=(480, 640)):
         self.toolbox_root_path = toolbox_root_path
         self.meta = scipy.io.loadmat(toolbox_root_path + '/Metadata/SUNRGBDMeta.mat')['SUNRGBDMeta'][0]
         self.ds_len = self.meta.shape[0]
         self.rotate_to_center = rotate_to_center
         self.npoints = npoints
-        self.crop, self.crop_sz = crop, crop_sz
+        self.im_sz = im_sz
 
     def __len__(self):
         return self.ds_len
 
     def __getitem__(self, idx):
         sample = {}
+        print('META\n')
+        print(len(self.meta[idx]))
 
         # --------------------------------- collecting rgb + depth data ---------------------------------
 
         depth_path = '..' + self.meta[idx][4][0][16:]
         img_path = '..' + self.meta[idx][5][0][16:]
-        sample['rgb'] = cv2.imread(img_path)[:300, :300, :]
+        sample['image'] = m.imresize(cv2.imread(img_path), (self.im_sz[0], self.im_sz[1])).transpose(2, 0, 1)
+
 
         depth = cv2.imread(depth_path, 0).astype(np.uint16)
         depth = np.float32(np.bitwise_or(np.right_shift(depth, 3), np.left_shift(depth, 16-3))) / 1000
         depth[depth == 0] = np.nan
         depth[depth > 8] = np.nan
-        sample['data'] = depth[:300, :300]
-
-        # if self.crop:
-            # do smth
-
+        sample['data'] = m.imresize(depth, (self.im_sz[0], self.im_sz[1]))
 
         # --------------------------------- point cloud creation ---------------------------------
 
@@ -276,20 +275,21 @@ class SUNRGBD(Dataset):
         sample['target'] = []
         pc_upright_camera = project_upright_depth_to_upright_camera(point_cloud[:,0:3])
 
-        for dat in self.meta[idx][1][0]:
+        for i in range(len(self.meta[idx][1][0])):
             tmp = {}
-
+            dat = self.meta[idx][1][0][i]
+            
             tmp['coeffs'] = dat[1][0] # w, l, h
             tmp['centroid'] = dat[2][0] # in original code authors do not save this data
             # tmp['basis'] = dat[0]
             # tmp['orientation'] = dat[-3]
-            if self.crop:
+            if len(dat[-2]) == 0:
                 continue
             else:
                 tmp['gt_bb2d'] = dat[-2][0] # xmin,ymin,xmax,ymax
                 xmin,ymin,xmax,ymax = dat[-2][0]
 
-            if len(dat[4]) == 0:
+            if len(dat[4]) == 0 or dat[4][0] not in type2class.keys():
                 continue
             else:
                 obj_type = dat[4][0]
@@ -313,11 +313,8 @@ class SUNRGBD(Dataset):
             rot_angle = get_center_view_rot_angle(frustum_angle)
 
             # Get 3D box corners
-            if self.crop:
-                continue
-            else:
-                box3d_pts_2d, box3d_pts_3d = compute_box_3d(tmp, heading_angle, sample['Rtilt'], sample['K']) 
-                tmp['gt_bb3d'] = box3d_pts_3d
+            box3d_pts_2d, box3d_pts_3d = compute_box_3d(tmp, heading_angle, sample['Rtilt'], sample['K']) 
+            tmp['gt_bb3d'] = box3d_pts_3d
 
             # Heading correction
             if self.rotate_to_center:
@@ -353,10 +350,11 @@ class SUNRGBD(Dataset):
             # Reject object with too few points
             if np.sum(label) < 5:
                 continue
-            tmp['label'] = label
+            else:
+                tmp['label'] = label
 
             sample['target'].append(tmp)
-
+        
         # ------------------------------------ END ------------------------------------
 
         return sample
