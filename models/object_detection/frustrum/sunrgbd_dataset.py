@@ -32,6 +32,12 @@ g_mean_size_arr = np.zeros((NUM_SIZE_CLUSTER, 3)) # size clustrs
 for i in range(NUM_SIZE_CLUSTER):
     g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
 
+# --------------------------------- TODO's ---------------------------------
+
+# TODO: add image resize (img_size=(480, 640)) + consider cropping patches
+# TODO: remove all data transforming part to another function
+# TODO: rewrite get_pc to numpy (optional) 
+
 def get_pc(depthmap, Rtilt, K):
         rows, cols = depthmap.shape
         cx, cy = K[0,2], K[1,2]
@@ -53,14 +59,11 @@ def get_pc(depthmap, Rtilt, K):
         to_pixels_in_world = np.dstack((x, y, z))
         to_pixels_in_world /= np.linalg.norm(to_pixels_in_world, axis=-1)[..., None]
         to_pixels_in_world[np.logical_not(valid), 2] = np.nan
-        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*depthmap[..., None] 
+        pts_3d_matrix = torch.from_numpy(to_pixels_in_world)*torch.FloatTensor(depthmap[..., None]) 
 
-        res = torch.t(torch.mm(torch.t(Rtilt), torch.t(torch.reshape(pts_3d_matrix, (-1, 3)))))
+        res = torch.t(torch.mm(torch.t(torch.FloatTensor(Rtilt)), torch.t(torch.reshape(pts_3d_matrix, (-1, 3)))))
         
         return res
-
-def get_center_view_rot_angle(angle):
-        return np.pi/2.0 + angle
 
 def angle2class(angle, num_class):
     ''' Convert continuous angle to discrete class
@@ -87,7 +90,7 @@ def class2angle(pred_cls, residual, num_class, to_label_format=True):
     if to_label_format and angle>np.pi:
         angle = angle - 2*np.pi
     return angle
-        
+
 def size2class(size, type_name):
     ''' Convert 3D box size (l,w,h) to size class and size residual '''
     size_class = type2class[type_name]
@@ -99,6 +102,64 @@ def class2size(pred_cls, residual):
     mean_size = type_mean_size[class2type[pred_cls]]
     return mean_size + residual
 
+# --------------------------------- Calibration ---------------------------------
+
+def flip_axis_to_camera(pc):
+    ''' 
+        Flip X-right,Y-forward,Z-up to X-right,Y-down,Z-forward
+        Input and output are both (N,3) array
+    '''
+    pc2 = np.copy(pc)
+    pc2[:,[0,1,2]] = pc2[:,[0,2,1]] # cam X,Y,Z = depth X,-Z,Y
+    pc2[:,1] *= -1
+    return pc2
+
+def flip_axis_to_depth(pc):
+    pc2 = np.copy(pc)
+    pc2[:,[0,1,2]] = pc2[:,[0,2,1]] # depth X,Y,Z = cam X,Z,-Y
+    pc2[:,2] *= -1
+    return pc2
+
+def project_image_to_camera(uv_depth, K):
+    n = uv_depth.shape[0]
+    c_u, c_v = K[0,2], K[1,2]
+    f_u, f_v = K[0,0], K[1,1]
+
+    x = ((uv_depth[:,0] - c_u)*uv_depth[:,2])/f_u
+    y = ((uv_depth[:,1] - c_v)*uv_depth[:,2])/f_v
+    pts_3d_camera = np.zeros((n,3))
+    pts_3d_camera[:,0] = x
+    pts_3d_camera[:,1] = y
+    pts_3d_camera[:,2] = uv_depth[:,2]
+
+    return pts_3d_camera
+
+def project_upright_depth_to_camera(pc, rtilt):
+    ''' project point cloud from depth coord to camera coordinate
+        Input: (N,3) Output: (N,3)
+    '''
+    # Project upright depth to depth coordinate
+    pc2 = np.dot(np.transpose(rtilt), np.transpose(pc[:,0:3])) # (3,n)
+    return flip_axis_to_camera(np.transpose(pc2))
+
+
+def project_upright_depth_to_upright_camera(pc):
+    return flip_axis_to_camera(pc)
+
+def project_upright_depth_to_image(pc, rtilt, K):
+    ''' Input: (N,3) Output: (N,2) UV and (N,) depth '''
+    pc2 = project_upright_depth_to_camera(pc, rtilt)
+    uv = np.dot(pc2, np.transpose(K)) # (n,3)
+    uv[:,0] /= uv[:,2]
+    uv[:,1] /= uv[:,2]
+    return uv[:,0:2], pc2[:,2] 
+    
+def project_image_to_upright_camera(uv_depth, Rtilt, K):
+    pts_3d_camera = project_image_to_camera(uv_depth, K)
+    pts_3d_depth = flip_axis_to_depth(pts_3d_camera)
+    pts_3d_upright_depth = np.transpose(np.dot(Rtilt, np.transpose(pts_3d_depth)))
+    return project_upright_depth_to_upright_camera(pts_3d_upright_depth)
+
 def rotate_pc_along_y(pc, rot_angle):
     ''' Input ps is NxC points with first 3 channels as XYZ
         z is facing forward, x is left ward, y is downward
@@ -108,6 +169,19 @@ def rotate_pc_along_y(pc, rot_angle):
     rotmat = np.array([[cosval, -sinval],[sinval, cosval]])
     pc[:,[0,2]] = np.dot(pc[:,[0,2]], np.transpose(rotmat))
     return pc
+
+# 
+
+def get_center_view_rot_angle(angle):
+        return np.pi/2.0 + angle
+
+def rotz(t):
+    """Rotation about the z-axis."""
+    c = np.cos(t)
+    s = np.sin(t)
+    return np.array([[c, -s,  0],
+                     [s,  c,  0],
+                     [0,  0,  1]])
 
 def in_hull(p, hull):
     from scipy.spatial import Delaunay
@@ -120,7 +194,7 @@ def extract_pc_in_box3d(pc, box3d):
     box3d_roi_inds = in_hull(pc[:,0:3], box3d)
     return pc[box3d_roi_inds,:], box3d_roi_inds
 
-def compute_box_3d(obj, angle):
+def compute_box_3d(obj, angle, rtilt, K):
     ''' Takes an object and a projection matrix (P) and projects the 3d
         bounding box into the image plane.
         Returns:
@@ -148,7 +222,7 @@ def compute_box_3d(obj, angle):
     corners_3d[2,:] += centroid[2]
 
     # project the 3d bounding box into the image plane
-    corners_2d, _ = project_upright_depth_to_image(np.transpose(corners_3d))
+    corners_2d, _ = project_upright_depth_to_image(np.transpose(corners_3d), rtilt, K)
     corners_3d = np.transpose(corners_3d)
     
     return corners_2d, flip_axis_to_camera(corners_3d)
@@ -158,12 +232,13 @@ def get_center_view_box3d_center(box3d):
     return rotate_pc_along_y(np.expand_dims(box3d_center,0), get_center_view_rot_angle(index)).squeeze()
 
 class SUNRGBD(Dataset):
-    def __init__(self, toolbox_root_path, npoints, rotate_to_center):
+    def __init__(self, toolbox_root_path, npoints, rotate_to_center, crop=False, crop_sz=0.0):
         self.toolbox_root_path = toolbox_root_path
-        self.meta = scipy.io.loadmat('Metadata/SUNRGBDMeta.mat')['SUNRGBDMeta'][0]
+        self.meta = scipy.io.loadmat(toolbox_root_path + '/Metadata/SUNRGBDMeta.mat')['SUNRGBDMeta'][0]
         self.ds_len = self.meta.shape[0]
         self.rotate_to_center = rotate_to_center
         self.npoints = npoints
+        self.crop, self.crop_sz = crop, crop_sz
 
     def __len__(self):
         return self.ds_len
@@ -175,13 +250,17 @@ class SUNRGBD(Dataset):
 
         depth_path = '..' + self.meta[idx][4][0][16:]
         img_path = '..' + self.meta[idx][5][0][16:]
-        sample['rgb'] = cv2.imread(img_path)
+        sample['rgb'] = cv2.imread(img_path)[:300, :300, :]
 
         depth = cv2.imread(depth_path, 0).astype(np.uint16)
         depth = np.float32(np.bitwise_or(np.right_shift(depth, 3), np.left_shift(depth, 16-3))) / 1000
         depth[depth == 0] = np.nan
         depth[depth > 8] = np.nan
-        sample['data'] = depth
+        sample['data'] = depth[:300, :300]
+
+        # if self.crop:
+            # do smth
+
 
         # --------------------------------- point cloud creation ---------------------------------
 
@@ -195,19 +274,27 @@ class SUNRGBD(Dataset):
         # ('sequenceName', 'O'), ('orientation', 'O'), ('gtBb2D', 'O'), ('label', 'O')
 
         sample['target'] = []
-        pc_upright_camera = self.project_upright_depth_to_upright_camera(point_cloud[:,0:3])
+        pc_upright_camera = project_upright_depth_to_upright_camera(point_cloud[:,0:3])
 
         for dat in self.meta[idx][1][0]:
             tmp = {}
 
-            tmp['coeffs'] = dat[1] # w, l, h
-            tmp['centroid'] = dat[3] # in original code authors do not save this data
+            tmp['coeffs'] = dat[1][0] # w, l, h
+            tmp['centroid'] = dat[2][0] # in original code authors do not save this data
             # tmp['basis'] = dat[0]
             # tmp['orientation'] = dat[-3]
-            tmp['gt_bb2d'] = dat[-2] # xmin,ymin,xmax,ymax
-            xmin,ymin,xmax,ymax = dat[-2]
-            obj_type = dat[4]
-            heading_angle = -1 * np.arctan2(dat[-3][1], dat[-3][0])
+            if self.crop:
+                continue
+            else:
+                tmp['gt_bb2d'] = dat[-2][0] # xmin,ymin,xmax,ymax
+                xmin,ymin,xmax,ymax = dat[-2][0]
+
+            if len(dat[4]) == 0:
+                continue
+            else:
+                obj_type = dat[4][0]
+
+            heading_angle = -1 * np.arctan2(dat[-3][0][1], dat[-3][0][0])
             
             # Get frustum angle (according to center pixel in 2D BOX)
             # TODO: understand why authors recreate a point cloud from random depth
@@ -217,7 +304,7 @@ class SUNRGBD(Dataset):
             uvdepth = np.zeros((1,3))
             uvdepth[0,0:2] = box2d_center
             uvdepth[0,2] = 20 # some random depth
-            box2d_center_upright_camera = self.project_image_to_upright_camera(uvdepth, 
+            box2d_center_upright_camera = project_image_to_upright_camera(uvdepth, 
                                                                                sample['Rtilt'],
                                                                                sample['K'])
             frustum_angle = -1 * np.arctan2(box2d_center_upright_camera[0,2],
@@ -226,9 +313,11 @@ class SUNRGBD(Dataset):
             rot_angle = get_center_view_rot_angle(frustum_angle)
 
             # Get 3D box corners
-
-            box3d_pts_2d, box3d_pts_3d = compute_box_3d(tmp, heading_angle) 
-            tmp['gt_bb3d'] = box3d_pts_3d
+            if self.crop:
+                continue
+            else:
+                box3d_pts_2d, box3d_pts_3d = compute_box_3d(tmp, heading_angle, sample['Rtilt'], sample['K']) 
+                tmp['gt_bb3d'] = box3d_pts_3d
 
             # Heading correction
             if self.rotate_to_center:
@@ -272,52 +361,10 @@ class SUNRGBD(Dataset):
 
         return sample
 
-    # --------------------------------- Calibration ---------------------------------
-
-    def flip_axis_to_camera(self, pc):
-        ''' 
-            Flip X-right,Y-forward,Z-up to X-right,Y-down,Z-forward
-            Input and output are both (N,3) array
-        '''
-        pc2 = np.copy(pc)
-        pc2[:,[0,1,2]] = pc2[:,[0,2,1]] # cam X,Y,Z = depth X,-Z,Y
-        pc2[:,1] *= -1
-        return pc2
-
-    def flip_axis_to_depth(self, pc):
-        pc2 = np.copy(pc)
-        pc2[:,[0,1,2]] = pc2[:,[0,2,1]] # depth X,Y,Z = cam X,Z,-Y
-        pc2[:,2] *= -1
-        return pc2
-
-    def project_image_to_camera(self, uv_depth, K):
-        n = uv_depth.shape[0]
-        c_u, c_v = K[0,2], K[1,2]
-        f_u, f_v = K[0,0], K[1,1]
-
-        x = ((uv_depth[:,0] - c_u)*uv_depth[:,2])/f_u
-        y = ((uv_depth[:,1] - c_v)*uv_depth[:,2])/f_v
-        pts_3d_camera = np.zeros((n,3))
-        pts_3d_camera[:,0] = x
-        pts_3d_camera[:,1] = y
-        pts_3d_camera[:,2] = uv_depth[:,2]
-
-        return pts_3d_camera
-
-    def project_upright_depth_to_upright_camera(self, pc):
-        return self.flip_axis_to_camera(pc)
-
-    def project_upright_depth_to_image(self, pc, rtilt):
-        ''' 
-            project point cloud from depth coord to camera coordinate
-                Input: (N,3) Output: (N,3)
-        '''
-        # Project upright depth to depth coordinate
-        pc2 = np.dot(np.transpose(rtilt), np.transpose(pc[:,0:3])) # (3,n)
-        return self.flip_axis_to_camera(np.transpose(pc2)) 
-        
-    def project_image_to_upright_camera(self, uv_depth, Rtilt, K):
-        pts_3d_camera = self.project_image_to_camera(uv_depth, K)
-        pts_3d_depth = self.flip_axis_to_depth(pts_3d_camera)
-        pts_3d_upright_depth = np.transpose(np.dot(Rtilt, np.transpose(pts_3d_depth)))
-        return self.project_upright_depth_to_upright_camera(pts_3d_upright_depth)
+    
+if __name__ == "__main__":
+    dataset = SUNRGBD(toolbox_root_path='/home/gbobrovskih/datasets/SUNRGBD/SUNRGBDtoolbox', npoints=10000, rotate_to_center=True)
+    batch_size=4
+    dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+    for i_batch, sample_batched in enumerate(dataloader):
+        print(i_batch, sample_batched['image'].size())
