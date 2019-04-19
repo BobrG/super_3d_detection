@@ -12,12 +12,12 @@ import numpy as np
 import scipy.io
 
 
-original_print = print
-def print(*args, **kwargs):
-    pass
+# original_print = print
+# def print(*args, **kwargs):
+#     pass
 
-def new_print(*args, **kwargs):
-    original_print(*args, **kwargs)
+# def new_print(*args, **kwargs):
+#     original_print(*args, **kwargs)
 
 
 NUM_HEADING_BIN = 12
@@ -43,11 +43,9 @@ for i in range(NUM_SIZE_CLUSTER):
     g_mean_size_arr[i,:] = type_mean_size[class2type[i]]
 
 def get_pc(depthmap, Rtilt, K):
-        print(depthmap)
         rows, cols = depthmap.shape
         cx, cy = K[0,2], K[1,2]
         fx, fy = K[0,0], K[1,1]
-        print(cx, cy, fx, fy)
         c, r = np.meshgrid(np.arange(1, cols+1), np.arange(1, rows+1), sparse=True)
 
         valid = depthmap > 0.
@@ -69,7 +67,7 @@ def get_pc(depthmap, Rtilt, K):
         #res = np.reshape(pts_3d_matrix, (-1,3))
         #res = torch.t(torch.mm(torch.FloatTensor(Rtilt), torch.t(torch.reshape(pts_3d_matrix, (-1,3)))))
         #res = torch.reshape(pts_3d_matrix, (-1,3))
-        print(np.where(~np.isnan(res)))     
+        
         return res
 
 def angle2class(angle, num_class):
@@ -240,11 +238,11 @@ def compute_box_3d(obj, angle, rtilt, K):
     y_corners = [w,w,-w,-w,w,w,-w,-w]
     z_corners = [h,h,h,h,-h,-h,-h,-h]
     corners_3d = np.dot(R, np.vstack([x_corners, y_corners, z_corners]))
-    #new_print('corners_3d', corners_3d)
+    
     corners_3d[0,:] += centroid[0]
     corners_3d[1,:] += centroid[1]
     corners_3d[2,:] += centroid[2]
-    #new_print('corners_3d', corners_3d)
+    
     # project the 3d bounding box into the image plane
     corners_2d, _ = project_upright_depth_to_image(np.transpose(corners_3d), rtilt, K)
     corners_3d = np.transpose(corners_3d)
@@ -326,7 +324,6 @@ class SUNRGBD(Dataset):
 
         depth_path = '..' + self.meta[idx][4][0][16:]
         img_path = '..' + self.meta[idx][5][0][16:]
-        print(img_path)
         im = cv2.imread(img_path)[:, :, ::-1] # rgb -> bgr
         im = m.imresize(im, (self.im_sz[0], self.im_sz[1]))
         im_blob, im_scales = _get_image_blob(im, self.im_sz)
@@ -340,7 +337,6 @@ class SUNRGBD(Dataset):
         else:
             sample['num_boxes'] = 0
 
-        #depth = cv2.imread(depth_path, 0).astype(np.uint16)
         depth = np.asarray(Image.open(depth_path), dtype=np.uint16)
         depth = np.float32(np.bitwise_or(np.right_shift(depth, 3), np.left_shift(depth, 16-3))) / 1000
         depth[depth == 0] = np.nan
@@ -358,21 +354,20 @@ class SUNRGBD(Dataset):
         # ('sequenceName', 'O'), ('orientation', 'O'), ('gtBb2D', 'O'), ('label', 'O')
 
         sample['target'] = []
-        tmp = {'coeffs':[], 'centroid':0.0, 'gt_bb2d':[], 'gt_bb3d':[], 'object_type':'none',
-              'frustum_angle':0.0, 'angle_class':0.0, 'angle_residual':0.0,
-              'size_class':0.0, 'size_residual':0.0, 'label':[]}
+        # empty_target = {'coeffs':[], 'centroid':0.0, 'gt_bb2d':[], 'gt_bb3d':[], 'object_type':'none',
+        #       'frustum_angle':0.0, 'angle_class':0.0, 'angle_residual':0.0,
+        #       'size_class':0.0, 'size_residual':0.0, 'label':[]}
         pc_upright_camera = project_upright_depth_to_upright_camera(point_cloud[:,0:3])
-
-        if sample['num_boxes'] == 0:
-            # sample['target'] = [{'gt_bb2d': [], 'gt_bb3d': []}]
-            return sample
+        
+        assert sample['num_boxes'] > 0
 
         for i in range(sample['num_boxes']):
+            tmp = {}
             dat = self.meta[idx][1][0][i]
-            
             coeffs = abs(dat[1][0]).astype(np.float32) # w, l, h
             if np.any(coeffs <= 0.00001):            
-                print('broken bounding box')
+                #print('broken bounding box')
+                sample['num_boxes'] -= 1
                 continue
             else:
                 tmp['coeffs'] = coeffs
@@ -383,36 +378,29 @@ class SUNRGBD(Dataset):
             # tmp['basis'] = dat[0]
             # tmp['orientation'] = dat[-3]
             if len(dat[-2]) == 0:
-                print('no gt 2d bb')
+                #print('no gt 2d bb')
+                sample['num_boxes'] -= 1
                 continue
             else:
-                print(dat[-2])
                 xmin,ymin,xmax,ymax = dat[-2][0].astype(np.float32)
                 xmax += xmin
                 ymax += ymin
-                #new_print(xmin,ymin,xmax,ymax)
                 tmp['gt_bb2d'] = [xmin,ymin,xmax,ymax]
 
             if len(dat[3]) == 0:
-                print('no class')
-                tmp['gt_bb2d'] = []
+                #print('no class')
+                sample['num_boxes'] -= 1
                 continue
 
             if dat[3][0] not in type2class.keys():
-                print('unknown class')
-                tmp['gt_bb2d'] = []
+                #print(dat[3][0], 'unknown class')
+                sample['num_boxes'] -= 1
                 continue
             else:
                 obj_type = dat[3][0]
             
             tmp['object_type'] = obj_type
-            print(obj_type)
-            print('xmin,ymin,xmax,ymax', xmin,ymin,xmax,ymax)
             heading_angle = -1 * np.arctan2(dat[-3][0][1], dat[-3][0][0])
-            
-            # Get frustum angle (according to center pixel in 2D BOX)
-            # TODO: understand why authors recreate a point cloud from random depth
-            # TODO: decide where to compute frustum angle
             
             box2d_center = np.array([(xmin+xmax)/2.0, (ymin+ymax)/2.0])
             uvdepth = np.zeros((1,3))
@@ -451,45 +439,31 @@ class SUNRGBD(Dataset):
 
             pc_image_coord, _ = project_upright_depth_to_image(point_cloud, sample['Rtilt'], sample['K'])
             
-            # bb2d_depth = depth[xmin:xmax, ymin:ymax]
-            # print('depth shape', depth.shape)
-            # print('bb2d_depth shape', bb2d_depth.shape)
-            # pc_in_box_fov = get_pc(bb2d_depth, sample['Rtilt'], sample['K'])
             box_inds = (pc_image_coord[:,0]<xmax) & (pc_image_coord[:,0]>=xmin) & (pc_image_coord[:,1]<ymax) & (pc_image_coord[:,1]>=ymin)
             pc_in_box_fov = pc_upright_camera[box_inds,:]
-            #new_print('pc_in_box_fov',pc_in_box_fov)
-            #new_print('box3d_pts_3d', box3d_pts_3d)
             if len(pc_in_box_fov) == 0:
-                tmp['gt_bb3d'] = []
+                sample['num_boxes'] -= 1
                 continue
-            print('box_inds {}; trues N {}'.format(box_inds, box_inds.sum()))
-            print('pc in box fov', pc_in_box_fov)
-            print('box3d pts 3d ', box3d_pts_3d)
-            print('not nans in pc in box fov', len(np.where(~np.isnan(pc_in_box_fov))[0]))
             _, inds = extract_pc_in_box3d(pc_in_box_fov, box3d_pts_3d)
             label = np.zeros((pc_in_box_fov.shape[0])).astype(np.float32)
-            print('labels shape', label.shape)
-            print('inds:', inds[inds == True])
-            print('label sum', np.sum(label))
             label[inds] = 1.0
             num_point = pc_in_box_fov.shape[0]
-            print('num points:', num_point)
             if num_point != 2048:
                 choice = np.random.choice(pc_in_box_fov.shape[0], 2048, replace = num_point < 2048)
-                print('choice:', choice)
                 pc_in_box_fov = pc_in_box_fov[choice,:]
                 label = label[choice]
             # Reject object with too few points
-            print(label)
+            
             if np.sum(label) < 5:
-                print(obj_type, 'rejecting object with too few points')
+                #print(obj_type, 'rejecting object with too few points')
+                sample['num_boxes'] -= 1
                 continue
             else:
-                print(obj_type, 'has enough points')
+                #print(obj_type, 'has enough points')
                 tmp['label'] = label
-                        
             sample['target'].append(tmp)
-            tmp = {}
+        
+        assert len(sample['target']) > 0
         
         # ------------------------------------ END ------------------------------------
 
@@ -510,23 +484,20 @@ class DatasetStarter(Dataset):
     
 if __name__ == "__main__":
     dataset_0 = SUNRGBD(toolbox_root_path='/home/gbobrovskih/datasets/SUNRGBD/SUNRGBDtoolbox', npoints=10000, rotate_to_center=True)
-    dataset = DatasetStarter(dataset_0, 1800)
-    batch_size=4
+    dataset = DatasetStarter(dataset_0, 4295)
+    batch_size=1
     dataloader = DataLoader(dataset, batch_size=4, shuffle=False)
     #loader = list(enumerate(dataloader))
     try:
         for i_batch, sample_batched in enumerate(dataloader):
-            #print(i_batch, sample_batched['image'].size())
-            #print(sample_batched['target'])
-            new_print('batch', i_batch)
             for sample_i, target in enumerate(sample_batched['target']):
                 if len(target) == 0:
-                    new_print('Broken empty target in batch {}, sample {}'.format(i_batch, sample_i))
+                    print('Broken empty target in batch {}, sample {}'.format(i_batch, sample_i))
                     continue
-                if len(target['gt_bb3d']) == 0:
-                    new_print('OK empty target in batch {}, sample {}'.format(i_batch, sample_i))
-                    continue
+                #if len(target['gt_bb3d']) == 0:
+                #    print('OK empty target in batch {}, sample {}'.format(i_batch, sample_i))
+                #    continue
     except ValueError as e:
-        new_print('ValueError in batch {}, sample {}'.format(i_batch, sample_i))
+        print('ValueError in batch {}, sample {}'.format(i_batch, sample_i))
         raise e
-    new_print('Finished')
+    print('Finished')
