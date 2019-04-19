@@ -307,19 +307,32 @@ def _get_image_blob(im, im_size):
   return blob, np.array(im_scale_factors)
 
 class SUNRGBD(Dataset):
-    def __init__(self, toolbox_root_path, npoints, rotate_to_center, im_sz=(480, 640)):
+    def __init__(self, toolbox_root_path, npoints, rotate_to_center, bad_indexes=None, im_sz=(480, 640)):
         self.toolbox_root_path = toolbox_root_path
         self.meta = scipy.io.loadmat(toolbox_root_path + '/Metadata/SUNRGBDMeta.mat')['SUNRGBDMeta'][0]
-        self.ds_len = self.meta.shape[0]
         self.rotate_to_center = rotate_to_center
         self.npoints = npoints
         self.im_sz = im_sz
+        if bad_indexes is not None:
+            bad_idx = []
+            with open(bad_indexes) as f:
+                for line in f:
+                    idxs.append(int(line))
+            bad_idx = set(bad_idx)
+            idx = set([i for i in range(1,10355)])
+            self.good_idx = list(idx.difference(bad_idx))
+            self.ds_len = len(self.good_idx)
+        else:
+            self.good_idx = [i for i in range(0,10354)]
+            self.ds_len = self.meta.shape[0]
+
 
     def __len__(self):
         return self.ds_len
 
-    def __getitem__(self, idx):
+    def __getitem__(self, index):
         sample = {}
+        idx = self.good_idx[index]
         # --------------------------------- collecting rgb + depth data ---------------------------------
 
         depth_path = '..' + self.meta[idx][4][0][16:]
@@ -483,7 +496,7 @@ class DatasetStarter(Dataset):
 
     
 if __name__ == "__main__":
-    dataset_0 = SUNRGBD(toolbox_root_path='/home/gbobrovskih/datasets/SUNRGBD/SUNRGBDtoolbox', npoints=10000, rotate_to_center=True)
+    dataset_0 = SUNRGBD(toolbox_root_path='/home/gbobrovskih/datasets/SUNRGBD/SUNRGBDtoolbox', npoints=10000, rotate_to_center=True, bad_indexes='/home/gbobrovskih/datasets/SUNRGBD/SUNRGBDtoolbox/bad_indexes')
     dataset = DatasetStarter(dataset_0, 4295)
     batch_size=1
     dataloader = DataLoader(dataset, batch_size=4, shuffle=False)
