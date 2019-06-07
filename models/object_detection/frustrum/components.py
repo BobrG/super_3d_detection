@@ -18,12 +18,12 @@ def Seg_PointNet(num_points=2000, K=3, k=0):
 			nn.ReLU(),
 			nn.Conv1d(64, 64, 1),
 			nn.BatchNorm1d(64),
-			nn.ReLU())) # mlp1
+			nn.ReLU(),
+                        nn.Conv1d(64, 64, 1),
+                        nn.BatchNorm1d(64),
+                        nn.ReLU())) # mlp1
 
     layers.append(nn.Sequential(
-			nn.Conv1d(64, 64, 1),
-			nn.BatchNorm1d(64),
-			nn.ReLU(),
 			nn.Conv1d(64, 128, 1),
 			nn.BatchNorm1d(128),
 			nn.ReLU(),
@@ -65,19 +65,21 @@ def T_Net(N, k=0):
 			nn.Conv1d(3, 128, 1),
 			nn.BatchNorm1d(128),
 			nn.ReLU(),
+                        nn.Conv1d(128, 128, 1),
+                        nn.BatchNorm1d(128),
+                        nn.ReLU(),
 			nn.Conv1d(128, 256, 1),
 			nn.BatchNorm1d(256),
 			nn.ReLU(),
-            nn.Conv1d(256, 512, 1),
-			nn.BatchNorm1d(512),
-			nn.ReLU()
             )) # mlp1
 
     #layers.append(nn.MaxPool1d(N))
 
     layers.append(nn.Sequential(
-            nn.Linear(512 + k, 256),
+            nn.Linear(256 + k, 256),
+            nn.ReLU(),
             nn.Linear(256, 128),
+            nn.ReLU(),
             nn.Linear(128, 3)
         )) # fc 
     return layers
@@ -105,7 +107,10 @@ def Box_Estimation_Net(M, NS, NH, k=0):
     layers.append(nn.MaxPool1d(M))
 
     layers.append(nn.Sequential(
-            nn.Linear(512 + k, 256),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, 256),
+            nn.ReLU(),
             nn.Linear(256, 3 + 4*NS + 2*NH)
         )) # fc
 
